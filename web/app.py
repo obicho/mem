@@ -21,7 +21,15 @@ def init_memory_client() -> Memory:
     Returns:
         The Memory client instance
     """
-    if "memory_client" not in st.session_state:
+    # Check if client exists and has required methods (handles code updates)
+    needs_init = "memory_client" not in st.session_state
+    if not needs_init:
+        # Re-init if client is missing new methods
+        client = st.session_state.memory_client
+        if not hasattr(client, "add_pdf") or not hasattr(client, "add_image"):
+            needs_init = True
+
+    if needs_init:
         settings = get_settings()
         st.session_state.memory_client = Memory(api_key=settings.openai_api_key)
 

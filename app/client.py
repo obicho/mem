@@ -13,6 +13,7 @@ from chromadb.config import Settings as ChromaSettings
 
 from app.core.chunker import chunk_content, detect_content_type, ContentType
 from app.core.embeddings import EmbeddingService
+from app.core.pdf_parser import PDFParser
 from app.core.vision import VisionService
 
 
@@ -47,6 +48,7 @@ class Memory:
         persist_dir: str = "./chroma_data",
         embedding_model: str = "text-embedding-3-small",
         image_dir: str = "./images",
+        files_dir: str = "./files",
         vision_model: str = "gpt-4o-mini",
     ):
         """
@@ -58,12 +60,16 @@ class Memory:
             persist_dir: Directory for persistent storage.
             embedding_model: OpenAI embedding model to use.
             image_dir: Directory for storing uploaded images.
+            files_dir: Directory for storing uploaded documents.
             vision_model: OpenAI vision model for image captioning.
         """
         self.embedding_service = EmbeddingService(api_key=api_key, model=embedding_model)
         self.vision_service = VisionService(api_key=api_key, model=vision_model)
+        self.pdf_parser = PDFParser()
         self.image_dir = Path(image_dir)
         self.image_dir.mkdir(parents=True, exist_ok=True)
+        self.files_dir = Path(files_dir)
+        self.files_dir.mkdir(parents=True, exist_ok=True)
 
         self.client = chromadb.PersistentClient(
             path=persist_dir,
@@ -533,6 +539,126 @@ class Memory:
             limit=limit,
             filters=filters,
         )
+
+    def add_pdf(
+        self,
+        file_path: Optional[str] = None,
+        file_bytes: Optional[bytes] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        filename: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Add a PDF document to memory by extracting and chunking its text.
+
+        Args:
+            file_path: Path to the PDF file.
+            file_bytes: Raw PDF bytes (alternative to file_path).
+            user_id: Optional user identifier for filtering.
+            agent_id: Optional agent identifier for filtering.
+            run_id: Optional run/session identifier.
+            metadata: Optional additional metadata.
+            filename: Optional filename for the stored PDF.
+
+        Returns:
+            Dict with memory_ids, file_path, page_count, and status.
+        """
+        if not file_path and not file_bytes:
+            raise ValueError("Must provide either file_path or file_bytes")
+
+        # Parse PDF
+        parsed = self.pdf_parser.parse(file_path=file_path, file_bytes=file_bytes)
+
+        if not parsed.content.strip():
+            raise ValueError("PDF contains no extractable text")
+
+        # Generate group ID for linking chunks
+        group_id = self._generate_id(parsed.content[:100])
+
+        # Store PDF file
+        if file_path:
+            stored_filename = filename or Path(file_path).name
+        else:
+            stored_filename = filename or f"{group_id}.pdf"
+
+        stored_path = self.files_dir / stored_filename
+        if file_path:
+            shutil.copy2(file_path, stored_path)
+        else:
+            with open(stored_path, "wb") as f:
+                f.write(file_bytes)
+
+        # Build base metadata
+        base_metadata: Dict[str, Any] = {
+            "created_at": datetime.utcnow().isoformat(),
+            "content_type": "pdf",
+            "file_path": str(stored_path),
+            "file_filename": stored_filename,
+            "page_count": parsed.page_count,
+            "group_id": group_id,
+        }
+        if user_id:
+            base_metadata["user_id"] = user_id
+        if agent_id:
+            base_metadata["agent_id"] = agent_id
+        if run_id:
+            base_metadata["run_id"] = run_id
+        if parsed.metadata:
+            base_metadata["pdf_metadata"] = str(parsed.metadata)
+        if metadata:
+            base_metadata.update(metadata)
+
+        # Chunk the content using document chunker
+        chunks = chunk_content(parsed.content, base_metadata, content_type="document")
+
+        # If no chunks from chunker, create one chunk per page
+        if not chunks:
+            chunks = []
+            for i, page_text in enumerate(parsed.pages):
+                if page_text.strip():
+                    chunks.append({
+                        "content": page_text,
+                        "metadata": {
+                            **base_metadata,
+                            "page_number": i + 1,
+                        },
+                    })
+
+        if not chunks:
+            raise ValueError("PDF produced no chunks")
+
+        # Store each chunk
+        memory_ids = []
+        for i, chunk in enumerate(chunks):
+            chunk_id = self._generate_id(chunk["content"])
+
+            # Add chunk-specific metadata
+            chunk_metadata = chunk["metadata"].copy()
+            chunk_metadata["chunk_index"] = i
+            chunk_metadata["total_chunks"] = len(chunks)
+
+            # Generate embedding
+            embedding = self.embedding_service.embed_text(chunk["content"])
+
+            # Store in ChromaDB
+            self.collection.add(
+                ids=[chunk_id],
+                embeddings=[embedding],
+                documents=[chunk["content"]],
+                metadatas=[chunk_metadata],
+            )
+            memory_ids.append(chunk_id)
+
+        return {
+            "memory_ids": memory_ids,
+            "group_id": group_id,
+            "file_path": str(stored_path),
+            "page_count": parsed.page_count,
+            "chunks_created": len(memory_ids),
+            "status": "added",
+        }
 
     def _generate_id(self, content: str) -> str:
         """Generate a unique memory ID."""

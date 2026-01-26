@@ -36,6 +36,9 @@ chroma_data/
 # Uploaded images
 images/
 
+# Uploaded documents
+files/
+
 # OS
 .DS_Store
 Thumbs.db

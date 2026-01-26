@@ -22,8 +22,8 @@ def render_memory_card(
     edit_key = f"edit_mode_{memory_id}"
     content_type = metadata.get("content_type", "")
 
-    # Check if we're in edit mode (not available for images)
-    is_editing = st.session_state.get(edit_key, False) and content_type != "image"
+    # Check if we're in edit mode (not available for images or PDFs)
+    is_editing = st.session_state.get(edit_key, False) and content_type not in ("image", "pdf")
 
     if is_editing:
         render_edit_mode(memory_client, memory_id, content, metadata, edit_key)
@@ -49,6 +49,7 @@ def render_view_mode(
     """
     content_type = metadata.get("content_type", "")
     image_path = metadata.get("image_path", "")
+    file_path = metadata.get("file_path", "")
 
     # Memory ID
     st.caption(f"ID: {memory_id}")
@@ -63,8 +64,28 @@ def render_view_mode(
 
         st.subheader("Caption")
         st.write(content)
+    elif content_type == "pdf":
+        # PDF memory
+        st.subheader("PDF Document")
+        page_count = metadata.get("page_count", "?")
+        chunk_index = metadata.get("chunk_index", 0)
+        total_chunks = metadata.get("total_chunks", 1)
+        st.caption(f"Pages: {page_count} | Chunk {chunk_index + 1} of {total_chunks}")
+
+        if file_path and Path(file_path).exists():
+            with open(file_path, "rb") as f:
+                st.download_button(
+                    "Download PDF",
+                    data=f.read(),
+                    file_name=metadata.get("file_filename", "document.pdf"),
+                    mime="application/pdf",
+                    key=f"download_pdf_{memory_id}",
+                )
+
+        st.subheader("Extracted Text")
+        st.write(content)
     else:
-        # Full content for non-image memories
+        # Full content for other memories
         st.subheader("Content")
         st.write(content)
 
@@ -79,14 +100,14 @@ def render_view_mode(
     col1, col2 = st.columns(2)
 
     with col1:
-        # Edit button (disabled for images since we can't edit the image itself)
-        if content_type == "image":
+        # Edit button (disabled for images and PDFs)
+        if content_type in ("image", "pdf"):
             st.button(
                 "Edit",
                 key=f"edit_btn_{memory_id}",
                 use_container_width=True,
                 disabled=True,
-                help="Image memories cannot be edited",
+                help=f"{content_type.upper()} memories cannot be edited",
             )
         else:
             if st.button("Edit", key=f"edit_btn_{memory_id}", use_container_width=True):
@@ -97,9 +118,13 @@ def render_view_mode(
         if st.button("Delete", key=f"del_card_{memory_id}", type="secondary", use_container_width=True):
             if st.session_state.get(f"confirm_delete_{memory_id}", False):
                 try:
-                    # Delete the image file if it exists
+                    # Delete the associated file if it exists
                     if content_type == "image" and image_path and Path(image_path).exists():
                         Path(image_path).unlink()
+                    elif content_type == "pdf" and file_path and Path(file_path).exists():
+                        # Only delete if this is the last chunk of the PDF
+                        # (checking group_id would be more robust but this is simpler)
+                        pass  # Don't delete file - other chunks may reference it
 
                     memory_client.delete(memory_id)
                     st.toast("Memory deleted!", icon="")

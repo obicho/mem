@@ -7,7 +7,7 @@ from app.client import Memory
 
 
 def render_add_memory(memory_client: Memory) -> None:
-    """Render the add memory form with support for text and images.
+    """Render the add memory form with support for text, images, and PDFs.
 
     Args:
         memory_client: The Memory client instance
@@ -15,13 +15,16 @@ def render_add_memory(memory_client: Memory) -> None:
     st.header("Add Memory")
 
     # Tabs for different content types
-    tab_text, tab_image = st.tabs(["Text", "Image"])
+    tab_text, tab_image, tab_pdf = st.tabs(["Text", "Image", "PDF"])
 
     with tab_text:
         render_text_form(memory_client)
 
     with tab_image:
         render_image_form(memory_client)
+
+    with tab_pdf:
+        render_pdf_form(memory_client)
 
 
 def render_text_form(memory_client: Memory) -> None:
@@ -186,3 +189,93 @@ def render_image_form(memory_client: Memory) -> None:
                 st.toast("Image added!", icon="")
             except Exception as e:
                 st.error(f"Failed to add image: {e}")
+
+
+def render_pdf_form(memory_client: Memory) -> None:
+    """Render the PDF upload form."""
+    with st.form("add_pdf_form", clear_on_submit=True):
+        # PDF upload
+        uploaded_file = st.file_uploader(
+            "Upload PDF",
+            type=["pdf"],
+            help="Upload a PDF document. Text will be extracted and chunked for search.",
+        )
+
+        # Optional fields in columns
+        col1, col2 = st.columns(2)
+
+        with col1:
+            user_id = st.text_input(
+                "User ID (optional)",
+                placeholder="e.g., alice",
+                help="Identifier for the user this memory belongs to",
+                key="pdf_user_id",
+            )
+
+        with col2:
+            agent_id = st.text_input(
+                "Agent ID (optional)",
+                placeholder="e.g., agent_123",
+                help="Identifier for the agent that created this memory",
+                key="pdf_agent_id",
+            )
+
+        # Metadata JSON input
+        metadata_str = st.text_area(
+            "Custom Metadata (optional)",
+            placeholder='{"key": "value"}',
+            height=100,
+            help="Additional metadata as JSON",
+            key="pdf_metadata",
+        )
+
+        # Submit button
+        submitted = st.form_submit_button(
+            "Upload & Process PDF",
+            type="primary",
+            use_container_width=True,
+        )
+
+        if submitted:
+            if not uploaded_file:
+                st.error("Please upload a PDF file")
+                return
+
+            # Parse metadata
+            metadata = None
+            if metadata_str.strip():
+                try:
+                    metadata = json.loads(metadata_str)
+                    if not isinstance(metadata, dict):
+                        st.error("Metadata must be a JSON object")
+                        return
+                except json.JSONDecodeError as e:
+                    st.error(f"Invalid JSON metadata: {e}")
+                    return
+
+            # Add PDF to memory
+            try:
+                with st.spinner("Extracting text and processing PDF..."):
+                    # Read PDF bytes
+                    pdf_bytes = uploaded_file.read()
+
+                    # Add custom metadata for original filename
+                    if metadata is None:
+                        metadata = {}
+                    metadata["original_filename"] = uploaded_file.name
+
+                    result = memory_client.add_pdf(
+                        file_bytes=pdf_bytes,
+                        user_id=user_id if user_id else None,
+                        agent_id=agent_id if agent_id else None,
+                        metadata=metadata,
+                        filename=uploaded_file.name,
+                    )
+
+                st.success(
+                    f"PDF added! {result['page_count']} pages, "
+                    f"{result['chunks_created']} chunks created."
+                )
+                st.toast("PDF added!", icon="")
+            except Exception as e:
+                st.error(f"Failed to add PDF: {e}")

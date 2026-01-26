@@ -94,6 +94,7 @@ def render_memory_item(
     """
     content_type = metadata.get("content_type", "")
     image_path = metadata.get("image_path", "")
+    file_path = metadata.get("file_path", "")
 
     with st.container(border=True):
         # Header row
@@ -106,7 +107,8 @@ def render_memory_item(
 
             badges = []
             if content_type:
-                badges.append(f"Type: {content_type}")
+                type_display = content_type.upper() if content_type == "pdf" else content_type
+                badges.append(f"Type: {type_display}")
             if user_id:
                 badges.append(f"User: {user_id}")
             if agent_id:
@@ -138,11 +140,16 @@ def render_memory_item(
                 except Exception as e:
                     st.error(f"Failed to delete: {e}")
 
-        # Show thumbnail for images
+        # Show thumbnail for images or PDF info
         if content_type == "image" and image_path and Path(image_path).exists():
             st.image(image_path, width=150)
+        elif content_type == "pdf":
+            page_count = metadata.get("page_count", "?")
+            chunk_index = metadata.get("chunk_index", 0)
+            total_chunks = metadata.get("total_chunks", 1)
+            st.caption(f"PDF: {page_count} pages | Chunk {chunk_index + 1}/{total_chunks}")
 
-        # Content preview (caption for images)
+        # Content preview
         preview = content[:150] + "..." if len(content) > 150 else content
         st.write(preview)
 
