@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import streamlit as st
 from app.client import Memory
 from web.components.memory_card import render_memory_card
@@ -90,6 +92,9 @@ def render_memory_item(
         content: The memory content
         metadata: The memory metadata
     """
+    content_type = metadata.get("content_type", "")
+    image_path = metadata.get("image_path", "")
+
     with st.container(border=True):
         # Header row
         col1, col2, col3 = st.columns([3, 1, 1])
@@ -100,6 +105,8 @@ def render_memory_item(
             created_at = metadata.get("created_at", "")
 
             badges = []
+            if content_type:
+                badges.append(f"Type: {content_type}")
             if user_id:
                 badges.append(f"User: {user_id}")
             if agent_id:
@@ -121,13 +128,21 @@ def render_memory_item(
             delete_key = f"del_list_{memory_id}"
             if st.button("Delete", key=delete_key, type="secondary", use_container_width=True):
                 try:
+                    # Delete the image file if it exists
+                    if content_type == "image" and image_path and Path(image_path).exists():
+                        Path(image_path).unlink()
+
                     memory_client.delete(memory_id)
                     st.toast("Memory deleted!", icon="")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to delete: {e}")
 
-        # Content preview
+        # Show thumbnail for images
+        if content_type == "image" and image_path and Path(image_path).exists():
+            st.image(image_path, width=150)
+
+        # Content preview (caption for images)
         preview = content[:150] + "..." if len(content) > 150 else content
         st.write(preview)
 

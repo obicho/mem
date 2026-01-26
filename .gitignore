@@ -33,6 +33,9 @@ htmlcov/
 # ChromaDB data
 chroma_data/
 
+# Uploaded images
+images/
+
 # OS
 .DS_Store
 Thumbs.db

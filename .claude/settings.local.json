@@ -3,7 +3,8 @@
     "allow": [
       "Bash(source .venv/bin/activate)",
       "Bash(python3:*)",
-      "Bash(python -m py_compile:*)"
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)"
     ]
   }
 }

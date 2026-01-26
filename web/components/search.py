@@ -1,10 +1,12 @@
+from pathlib import Path
+
 import streamlit as st
 from app.client import Memory
 from web.components.memory_card import render_memory_card
 
 
 def render_search(memory_client: Memory, user_id_filter: str | None = None) -> None:
-    """Render the search interface.
+    """Render the search interface with text and image search.
 
     Args:
         memory_client: The Memory client instance
@@ -12,6 +14,18 @@ def render_search(memory_client: Memory, user_id_filter: str | None = None) -> N
     """
     st.header("Search Memories")
 
+    # Tabs for different search modes
+    tab_text, tab_image = st.tabs(["Text Search", "Image Search"])
+
+    with tab_text:
+        render_text_search(memory_client, user_id_filter)
+
+    with tab_image:
+        render_image_search(memory_client, user_id_filter)
+
+
+def render_text_search(memory_client: Memory, user_id_filter: str | None = None) -> None:
+    """Render text-based search interface."""
     # Search form
     col1, col2 = st.columns([4, 1])
 
@@ -20,28 +34,29 @@ def render_search(memory_client: Memory, user_id_filter: str | None = None) -> N
             "Search Query",
             placeholder="Enter search query...",
             label_visibility="collapsed",
+            key="text_search_query",
         )
 
     with col2:
-        search_clicked = st.button("Search", type="primary", use_container_width=True)
+        search_clicked = st.button("Search", type="primary", use_container_width=True, key="text_search_btn")
 
     # Search options
     with st.expander("Search Options"):
-        limit = st.slider("Number of results", min_value=1, max_value=50, value=10)
+        limit = st.slider("Number of results", min_value=1, max_value=50, value=10, key="text_search_limit")
 
     # Perform search
-    if query and (search_clicked or "last_query" in st.session_state):
+    if query and (search_clicked or "last_text_query" in st.session_state):
         # Store query in session for persistence
         if search_clicked:
-            st.session_state.last_query = query
-            st.session_state.last_limit = limit
-            st.session_state.last_user_filter = user_id_filter
+            st.session_state.last_text_query = query
+            st.session_state.last_text_limit = limit
+            st.session_state.last_text_user_filter = user_id_filter
 
         try:
             results = memory_client.search(
-                query=st.session_state.get("last_query", query),
-                user_id=st.session_state.get("last_user_filter", user_id_filter),
-                limit=st.session_state.get("last_limit", limit),
+                query=st.session_state.get("last_text_query", query),
+                user_id=st.session_state.get("last_text_user_filter", user_id_filter),
+                limit=st.session_state.get("last_text_limit", limit),
             )
 
             if not results:
@@ -50,7 +65,7 @@ def render_search(memory_client: Memory, user_id_filter: str | None = None) -> N
                 st.subheader(f"Results ({len(results)})")
 
                 for result in results:
-                    render_search_result(memory_client, result)
+                    render_search_result(memory_client, result, prefix="text")
 
         except Exception as e:
             st.error(f"Search failed: {e}")
@@ -58,17 +73,81 @@ def render_search(memory_client: Memory, user_id_filter: str | None = None) -> N
         st.info("Enter a search query to find memories.")
 
 
-def render_search_result(memory_client: Memory, result: dict) -> None:
+def render_image_search(memory_client: Memory, user_id_filter: str | None = None) -> None:
+    """Render image-based search interface."""
+    st.write("Upload an image to find similar images in memory.")
+
+    # Image upload
+    uploaded_file = st.file_uploader(
+        "Upload Query Image",
+        type=["jpg", "jpeg", "png", "gif", "webp"],
+        help="Upload an image to search for similar images.",
+        key="image_search_upload",
+    )
+
+    # Search options
+    with st.expander("Search Options"):
+        limit = st.slider("Number of results", min_value=1, max_value=50, value=10, key="image_search_limit")
+
+    # Show uploaded image preview
+    if uploaded_file:
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.image(uploaded_file, caption="Query Image", width=200)
+
+        with col2:
+            search_clicked = st.button(
+                "Search Similar Images",
+                type="primary",
+                use_container_width=True,
+                key="image_search_btn",
+            )
+
+            if search_clicked:
+                try:
+                    with st.spinner("Analyzing image and searching..."):
+                        # Read image bytes
+                        image_bytes = uploaded_file.read()
+                        uploaded_file.seek(0)  # Reset for potential re-read
+
+                        results = memory_client.search_image(
+                            image_bytes=image_bytes,
+                            user_id=user_id_filter,
+                            limit=limit,
+                        )
+
+                    if not results:
+                        st.info("No similar images found.")
+                    else:
+                        st.session_state.image_search_results = results
+                        st.rerun()
+
+                except Exception as e:
+                    st.error(f"Image search failed: {e}")
+
+    # Display results if available
+    if "image_search_results" in st.session_state and st.session_state.image_search_results:
+        results = st.session_state.image_search_results
+        st.subheader(f"Similar Images ({len(results)})")
+
+        for result in results:
+            render_search_result(memory_client, result, prefix="image")
+
+
+def render_search_result(memory_client: Memory, result: dict, prefix: str = "") -> None:
     """Render a single search result.
 
     Args:
         memory_client: The Memory client instance
         result: The search result dict containing id, content, score, metadata
+        prefix: Prefix for unique keys
     """
     memory_id = result.get("id", "")
     content = result.get("content", "")
     score = result.get("score", 0)
     metadata = result.get("metadata", {})
+    content_type = metadata.get("content_type", "")
+    image_path = metadata.get("image_path", "")
 
     with st.container(border=True):
         # Header with score and user info
@@ -81,6 +160,8 @@ def render_search_result(memory_client: Memory, result: dict) -> None:
             user_id = metadata.get("user_id", "")
             agent_id = metadata.get("agent_id", "")
             badges = []
+            if content_type:
+                badges.append(f"Type: {content_type}")
             if user_id:
                 badges.append(f"User: {user_id}")
             if agent_id:
@@ -89,15 +170,22 @@ def render_search_result(memory_client: Memory, result: dict) -> None:
                 st.caption(" | ".join(badges))
 
         with col3:
-            if st.button("Delete", key=f"del_search_{memory_id}", type="secondary"):
+            if st.button("Delete", key=f"del_{prefix}_{memory_id}", type="secondary"):
                 try:
                     memory_client.delete(memory_id)
+                    # Clear image search results if deleting from image search
+                    if "image_search_results" in st.session_state:
+                        del st.session_state.image_search_results
                     st.toast("Memory deleted!", icon="")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to delete: {e}")
 
-        # Content preview
+        # Show image if this is an image memory
+        if content_type == "image" and image_path and Path(image_path).exists():
+            st.image(image_path, width=300)
+
+        # Content preview (caption for images, text for others)
         preview = content[:200] + "..." if len(content) > 200 else content
         st.write(preview)
 
