@@ -1,6 +1,6 @@
 # Memory
 
-A mem0-style memory system for AI agents. Store, search, and manage memories with support for text, images, and documents.
+A style memory system for AI agents. Store, search, and manage memories with support for text, images, and documents.
 
 ## Features
 
