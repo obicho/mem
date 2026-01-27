@@ -22,8 +22,8 @@ def render_memory_card(
     edit_key = f"edit_mode_{memory_id}"
     content_type = metadata.get("content_type", "")
 
-    # Check if we're in edit mode (not available for images or PDFs)
-    is_editing = st.session_state.get(edit_key, False) and content_type not in ("image", "pdf")
+    # Check if we're in edit mode (not available for PDFs since they're extracted text)
+    is_editing = st.session_state.get(edit_key, False) and content_type != "pdf"
 
     if is_editing:
         render_edit_mode(memory_client, memory_id, content, metadata, edit_key)
@@ -100,17 +100,18 @@ def render_view_mode(
     col1, col2 = st.columns(2)
 
     with col1:
-        # Edit button (disabled for images and PDFs)
-        if content_type in ("image", "pdf"):
+        # Edit button (disabled for PDFs since they're extracted text)
+        if content_type == "pdf":
             st.button(
                 "Edit",
                 key=f"edit_btn_{memory_id}",
                 use_container_width=True,
                 disabled=True,
-                help=f"{content_type.upper()} memories cannot be edited",
+                help="PDF memories cannot be edited (extracted text)",
             )
         else:
-            if st.button("Edit", key=f"edit_btn_{memory_id}", use_container_width=True):
+            edit_label = "Edit Caption" if content_type == "image" else "Edit"
+            if st.button(edit_label, key=f"edit_btn_{memory_id}", use_container_width=True):
                 st.session_state[edit_key] = True
                 st.rerun()
 
@@ -127,7 +128,7 @@ def render_view_mode(
                         pass  # Don't delete file - other chunks may reference it
 
                     memory_client.delete(memory_id)
-                    st.toast("Memory deleted!", icon="")
+                    st.toast("Memory deleted!", icon="🗑️")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to delete: {e}")
@@ -155,11 +156,19 @@ def render_edit_mode(
     """
     st.caption(f"ID: {memory_id}")
 
-    # Editable content
+    content_type = metadata.get("content_type", "")
+    image_path = metadata.get("image_path", "")
+
+    # Show image preview if editing an image memory
+    if content_type == "image" and image_path and Path(image_path).exists():
+        st.image(image_path, width=300)
+
+    # Editable content (caption for images)
+    content_label = "Caption" if content_type == "image" else "Content"
     new_content = st.text_area(
-        "Content",
+        content_label,
         value=content,
-        height=200,
+        height=200 if content_type != "image" else 100,
         key=f"content_edit_{memory_id}",
     )
 
@@ -201,7 +210,8 @@ def render_edit_mode(
                     metadata=new_metadata if new_metadata else None,
                 )
                 st.session_state[edit_key] = False
-                st.toast("Memory updated!", icon="")
+                toast_msg = "Caption updated!" if content_type == "image" else "Memory updated!"
+                st.toast(toast_msg, icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to update: {e}")

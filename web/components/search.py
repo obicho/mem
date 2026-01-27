@@ -63,9 +63,10 @@ def render_text_search(memory_client: Memory, user_id_filter: str | None = None)
                 st.info("No memories found matching your query.")
             else:
                 st.subheader(f"Results ({len(results)})")
+                search_query = st.session_state.get("last_text_query", query)
 
                 for result in results:
-                    render_search_result(memory_client, result, prefix="text")
+                    render_search_result(memory_client, result, query=search_query, prefix="text")
 
         except Exception as e:
             st.error(f"Search failed: {e}")
@@ -131,15 +132,22 @@ def render_image_search(memory_client: Memory, user_id_filter: str | None = None
         st.subheader(f"Similar Images ({len(results)})")
 
         for result in results:
-            render_search_result(memory_client, result, prefix="image")
+            # Use "image_search" as query placeholder since actual caption isn't stored
+            render_search_result(memory_client, result, query="[image_search]", prefix="image")
 
 
-def render_search_result(memory_client: Memory, result: dict, prefix: str = "") -> None:
-    """Render a single search result.
+def render_search_result(
+    memory_client: Memory,
+    result: dict,
+    query: str = "",
+    prefix: str = "",
+) -> None:
+    """Render a single search result with feedback buttons.
 
     Args:
         memory_client: The Memory client instance
         result: The search result dict containing id, content, score, metadata
+        query: The search query (for feedback)
         prefix: Prefix for unique keys
     """
     memory_id = result.get("id", "")
@@ -151,7 +159,7 @@ def render_search_result(memory_client: Memory, result: dict, prefix: str = "") 
 
     with st.container(border=True):
         # Header with score and user info
-        col1, col2, col3 = st.columns([1, 3, 1])
+        col1, col2, col3, col4 = st.columns([1, 2, 1, 1])
 
         with col1:
             st.metric("Score", f"{score:.2f}")
@@ -170,13 +178,31 @@ def render_search_result(memory_client: Memory, result: dict, prefix: str = "") 
                 st.caption(" | ".join(badges))
 
         with col3:
+            # Feedback buttons
+            fb_col1, fb_col2 = st.columns(2)
+            with fb_col1:
+                if st.button("👍", key=f"fb_pos_{prefix}_{memory_id}", help="Helpful result"):
+                    try:
+                        memory_client.feedback(query=query, memory_id=memory_id, signal="positive")
+                        st.toast("Thanks for the feedback!", icon="👍")
+                    except Exception as e:
+                        st.error(f"Failed to record feedback: {e}")
+            with fb_col2:
+                if st.button("👎", key=f"fb_neg_{prefix}_{memory_id}", help="Not helpful"):
+                    try:
+                        memory_client.feedback(query=query, memory_id=memory_id, signal="negative")
+                        st.toast("Thanks for the feedback!", icon="👎")
+                    except Exception as e:
+                        st.error(f"Failed to record feedback: {e}")
+
+        with col4:
             if st.button("Delete", key=f"del_{prefix}_{memory_id}", type="secondary"):
                 try:
                     memory_client.delete(memory_id)
                     # Clear image search results if deleting from image search
                     if "image_search_results" in st.session_state:
                         del st.session_state.image_search_results
-                    st.toast("Memory deleted!", icon="")
+                    st.toast("Memory deleted!", icon="🗑️")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to delete: {e}")

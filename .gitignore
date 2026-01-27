@@ -39,6 +39,9 @@ images/
 # Uploaded documents
 files/
 
+# Feedback database
+feedback.db
+
 # OS
 .DS_Store
 Thumbs.db

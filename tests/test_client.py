@@ -8,10 +8,19 @@ from unittest.mock import MagicMock, patch
 
 @pytest.fixture
 def mock_embedding_service():
-    """Mock the embedding service."""
+    """Mock the embedding service with content-dependent embeddings."""
     with patch("app.client.EmbeddingService") as mock:
         instance = MagicMock()
-        instance.embed_text.return_value = [0.1] * 1536
+        # Generate different embeddings based on content hash to avoid false duplicates
+        def generate_embedding(text):
+            import hashlib
+            hash_bytes = hashlib.sha256(text.encode()).digest()
+            # Create a 1536-dim embedding from hash bytes (cycling through)
+            embedding = []
+            for i in range(1536):
+                embedding.append(hash_bytes[i % 32] / 255.0)
+            return embedding
+        instance.embed_text.side_effect = generate_embedding
         mock.return_value = instance
         yield instance
 
@@ -188,3 +197,67 @@ def test_count_memories(memory_client):
     assert memory_client.count() == 2
     assert memory_client.count(user_id="test_user") == 2
     assert memory_client.count(user_id="other_user") == 0
+
+
+def test_duplicate_detection_exact_match(memory_client):
+    """Test that exact duplicate content is detected."""
+    content = "This is a unique memory content"
+
+    # Add first memory
+    result1 = memory_client.add(content, user_id="test_user")
+    assert result1["status"] == "added"
+
+    # Try to add the same content again
+    result2 = memory_client.add(content, user_id="test_user")
+    assert result2["status"] == "duplicate"
+    assert result2["memory_id"] == result1["memory_id"]
+
+    # Should still only have 1 memory
+    assert memory_client.count() == 1
+
+
+def test_duplicate_detection_case_insensitive(memory_client):
+    """Test that duplicate detection is case-insensitive."""
+    content1 = "Hello World"
+    content2 = "hello world"
+
+    result1 = memory_client.add(content1, user_id="test_user")
+    assert result1["status"] == "added"
+
+    # Same content with different case should be detected as duplicate
+    result2 = memory_client.add(content2, user_id="test_user")
+    assert result2["status"] == "duplicate"
+
+
+def test_duplicate_detection_disabled(memory_client):
+    """Test that duplicate detection can be disabled."""
+    content = "Duplicate content test"
+
+    result1 = memory_client.add(content, user_id="test_user", dedupe=False)
+    assert result1["status"] == "added"
+
+    # With dedupe disabled, should add as new memory
+    result2 = memory_client.add(content, user_id="test_user", dedupe=False)
+    assert result2["status"] == "added"
+    assert result2["memory_id"] != result1["memory_id"]
+
+    # Should have 2 memories now
+    assert memory_client.count() == 2
+
+
+def test_find_duplicates(memory_client):
+    """Test the find_duplicates method."""
+    content = "Find duplicates test content"
+
+    # Initially no duplicates
+    duplicates = memory_client.find_duplicates(content)
+    assert len(duplicates) == 0
+
+    # Add the content
+    memory_client.add(content, user_id="test_user")
+
+    # Now should find duplicate
+    duplicates = memory_client.find_duplicates(content)
+    assert len(duplicates) == 1
+    assert duplicates[0]["match_type"] == "exact"
+    assert duplicates[0]["similarity"] == 1.0

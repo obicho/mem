@@ -4,12 +4,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
-from app.core.chunker import chunk_email
+from app.core.chunker import ContentType, chunk_content
 from app.core.email_parser import parse_email
 from app.core.embeddings import embed_batch
 from app.db.chromadb import ChromaDBClient
 from app.dependencies import get_db, verify_api_key
-from app.models.schemas import APIResponse, EmailListResponse, IngestResponse
+from app.models.schemas import APIResponse, EmailChunk, EmailListResponse, IngestResponse
 
 router = APIRouter(prefix="/emails", tags=["emails"])
 
@@ -48,7 +48,26 @@ async def ingest_email(
             detail=f"Failed to parse email: {str(e)}",
         )
 
-    chunks = chunk_email(email_doc)
+    # Build metadata from email document
+    email_metadata = {
+        "message_id": email_doc.message_id,
+        "subject": email_doc.subject,
+        "sender": email_doc.sender,
+        "recipients": email_doc.recipients,
+    }
+    chunk_dicts = chunk_content(email_doc.body, email_metadata, ContentType.EMAIL)
+
+    # Convert to EmailChunk objects for db.add_email
+    chunks = [
+        EmailChunk(
+            chunk_id=f"{email_doc.message_id}_{i}",
+            email_id=email_doc.message_id,
+            content=chunk["content"],
+            chunk_index=i,
+            metadata=chunk.get("metadata", {}),
+        )
+        for i, chunk in enumerate(chunk_dicts)
+    ]
 
     if chunks:
         try:

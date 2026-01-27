@@ -98,7 +98,7 @@ def render_text_form(memory_client: Memory) -> None:
                     st.success(f"Memory added! Created {result['chunks_created']} chunks.")
                 else:
                     st.success(f"Memory added! ID: {result['memory_id']}")
-                st.toast("Memory added!", icon="")
+                st.toast("Memory added!", icon="✅")
             except Exception as e:
                 st.error(f"Failed to add memory: {e}")
 
@@ -186,7 +186,7 @@ def render_image_form(memory_client: Memory) -> None:
 
                 st.success(f"Image added! ID: {result['memory_id']}")
                 st.info(f"Generated caption: {result['caption'][:200]}...")
-                st.toast("Image added!", icon="")
+                st.toast("Image added!", icon="🖼️")
             except Exception as e:
                 st.error(f"Failed to add image: {e}")
 
@@ -276,6 +276,6 @@ def render_pdf_form(memory_client: Memory) -> None:
                     f"PDF added! {result['page_count']} pages, "
                     f"{result['chunks_created']} chunks created."
                 )
-                st.toast("PDF added!", icon="")
+                st.toast("PDF added!", icon="📄")
             except Exception as e:
                 st.error(f"Failed to add PDF: {e}")

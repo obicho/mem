@@ -13,6 +13,7 @@ from chromadb.config import Settings as ChromaSettings
 
 from app.core.chunker import chunk_content, detect_content_type, ContentType
 from app.core.embeddings import EmbeddingService
+from app.core.feedback import Feedback, FeedbackStore
 from app.core.pdf_parser import PDFParser
 from app.core.vision import VisionService
 
@@ -49,6 +50,7 @@ class Memory:
         embedding_model: str = "text-embedding-3-small",
         image_dir: str = "./images",
         files_dir: str = "./files",
+        feedback_db: str = "./feedback.db",
         vision_model: str = "gpt-4o-mini",
     ):
         """
@@ -61,11 +63,13 @@ class Memory:
             embedding_model: OpenAI embedding model to use.
             image_dir: Directory for storing uploaded images.
             files_dir: Directory for storing uploaded documents.
+            feedback_db: Path to feedback SQLite database.
             vision_model: OpenAI vision model for image captioning.
         """
         self.embedding_service = EmbeddingService(api_key=api_key, model=embedding_model)
         self.vision_service = VisionService(api_key=api_key, model=vision_model)
         self.pdf_parser = PDFParser()
+        self.feedback_store = FeedbackStore(db_path=feedback_db)
         self.image_dir = Path(image_dir)
         self.image_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir = Path(files_dir)
@@ -90,9 +94,11 @@ class Memory:
         memory_id: Optional[str] = None,
         content_type: Optional[str] = None,
         chunking: bool = True,
+        dedupe: bool = True,
+        dedupe_threshold: float = 0.98,
     ) -> Dict[str, Any]:
         """
-        Add a memory with auto-detection chunking.
+        Add a memory with auto-detection chunking and duplicate detection.
 
         Args:
             content: The text content to remember.
@@ -104,16 +110,32 @@ class Memory:
             content_type: Optional content type hint ("email", "chat", "document").
                          Auto-detected if not provided.
             chunking: Whether to chunk long content. Default True.
+            dedupe: Whether to check for duplicates. Default True.
+            dedupe_threshold: Similarity threshold for duplicate detection (0-1). Default 0.95.
 
         Returns:
-            Dict with memory_id(s) and status.
+            Dict with memory_id(s) and status. If duplicate found, returns existing memory ID
+            with status "duplicate".
         """
         if not content or not content.strip():
             raise ValueError("Content cannot be empty")
 
+        # Check for duplicates if enabled
+        if dedupe:
+            duplicates = self.find_duplicates(content, threshold=dedupe_threshold, limit=1)
+            if duplicates:
+                existing = duplicates[0]
+                return {
+                    "memory_id": existing["id"],
+                    "status": "duplicate",
+                    "similarity": existing["similarity"],
+                    "match_type": existing["match_type"],
+                }
+
         # Build base metadata
         base_metadata: Dict[str, Any] = {
             "created_at": datetime.utcnow().isoformat(),
+            "content_hash": self._compute_content_hash(content),
         }
         if user_id:
             base_metadata["user_id"] = user_id
@@ -211,10 +233,11 @@ class Memory:
         # Generate query embedding
         query_embedding = self.embedding_service.embed_text(query)
 
-        # Search
+        # Search - fetch extra results to allow re-ranking
+        fetch_limit = min(limit * 2, limit + 20)  # Fetch more for re-ranking
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=limit,
+            n_results=fetch_limit,
             where=where_clause,
             include=["documents", "metadatas", "distances"],
         )
@@ -222,16 +245,34 @@ class Memory:
         # Format results
         memories = []
         if results["ids"] and results["ids"][0]:
-            for i, memory_id in enumerate(results["ids"][0]):
+            memory_ids = results["ids"][0]
+
+            # Get feedback scores for all results
+            feedback_scores = self.feedback_store.get_memory_scores(memory_ids)
+
+            for i, memory_id in enumerate(memory_ids):
                 distance = results["distances"][0][i] if results["distances"] else 0
-                score = 1 / (1 + distance)
+                similarity_score = 1 / (1 + distance)
+
+                # Blend similarity score with feedback score
+                # feedback_score is -1 to 1, we scale it to a boost factor
+                feedback_score = feedback_scores.get(memory_id, 0.0)
+                # Apply feedback as a multiplicative boost (0.8x to 1.2x)
+                feedback_boost = 1.0 + (feedback_score * 0.2)
+                final_score = similarity_score * feedback_boost
 
                 memories.append({
                     "id": memory_id,
                     "content": results["documents"][0][i] if results["documents"] else "",
-                    "score": score,
+                    "score": final_score,
+                    "similarity_score": similarity_score,
+                    "feedback_score": feedback_score,
                     "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
                 })
+
+            # Re-rank by final score and limit results
+            memories.sort(key=lambda x: x["score"], reverse=True)
+            memories = memories[:limit]
 
         return memories
 
@@ -423,6 +464,7 @@ class Memory:
         run_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         filename: Optional[str] = None,
+        dedupe: bool = True,
     ) -> Dict[str, Any]:
         """
         Add an image to memory by generating a caption and embedding it.
@@ -435,12 +477,38 @@ class Memory:
             run_id: Optional run/session identifier.
             metadata: Optional additional metadata.
             filename: Optional filename for the stored image.
+            dedupe: Whether to check for duplicate images. Default True.
 
         Returns:
-            Dict with memory_id, image_path, and status.
+            Dict with memory_id, image_path, and status. If duplicate found,
+            returns existing memory ID with status "duplicate".
         """
         if not image_path and not image_bytes:
             raise ValueError("Must provide either image_path or image_bytes")
+
+        # Get image bytes for hashing
+        if image_path:
+            with open(image_path, "rb") as f:
+                img_bytes = f.read()
+        else:
+            img_bytes = image_bytes
+
+        # Check for duplicate image by hash
+        if dedupe:
+            image_hash = hashlib.sha256(img_bytes).hexdigest()[:32]
+            try:
+                hash_results = self.collection.get(
+                    where={"image_hash": image_hash},
+                    include=["documents", "metadatas"],
+                )
+                if hash_results["ids"]:
+                    return {
+                        "memory_id": hash_results["ids"][0],
+                        "status": "duplicate",
+                        "match_type": "exact_image",
+                    }
+            except Exception:
+                pass  # image_hash field might not exist
 
         # Generate caption using vision service
         caption = self.vision_service.caption_image(
@@ -463,9 +531,12 @@ class Memory:
                 f.write(image_bytes)
 
         # Build metadata
+        image_hash = hashlib.sha256(img_bytes).hexdigest()[:32]
         mem_metadata: Dict[str, Any] = {
             "created_at": datetime.utcnow().isoformat(),
             "content_type": "image",
+            "content_hash": self._compute_content_hash(caption),
+            "image_hash": image_hash,
             "image_path": str(stored_path),
             "image_filename": stored_filename,
         }
@@ -549,6 +620,7 @@ class Memory:
         run_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         filename: Optional[str] = None,
+        dedupe: bool = True,
     ) -> Dict[str, Any]:
         """
         Add a PDF document to memory by extracting and chunking its text.
@@ -561,12 +633,40 @@ class Memory:
             run_id: Optional run/session identifier.
             metadata: Optional additional metadata.
             filename: Optional filename for the stored PDF.
+            dedupe: Whether to check for duplicate PDFs. Default True.
 
         Returns:
-            Dict with memory_ids, file_path, page_count, and status.
+            Dict with memory_ids, file_path, page_count, and status. If duplicate found,
+            returns existing group ID with status "duplicate".
         """
         if not file_path and not file_bytes:
             raise ValueError("Must provide either file_path or file_bytes")
+
+        # Get file bytes for hashing
+        if file_path:
+            with open(file_path, "rb") as f:
+                pdf_bytes = f.read()
+        else:
+            pdf_bytes = file_bytes
+
+        # Check for duplicate PDF by file hash
+        if dedupe:
+            file_hash = hashlib.sha256(pdf_bytes).hexdigest()[:32]
+            try:
+                hash_results = self.collection.get(
+                    where={"file_hash": file_hash},
+                    include=["metadatas"],
+                )
+                if hash_results["ids"]:
+                    existing_meta = hash_results["metadatas"][0] if hash_results["metadatas"] else {}
+                    return {
+                        "memory_id": hash_results["ids"][0],
+                        "group_id": existing_meta.get("group_id"),
+                        "status": "duplicate",
+                        "match_type": "exact_file",
+                    }
+            except Exception:
+                pass  # file_hash field might not exist
 
         # Parse PDF
         parsed = self.pdf_parser.parse(file_path=file_path, file_bytes=file_bytes)
@@ -591,9 +691,11 @@ class Memory:
                 f.write(file_bytes)
 
         # Build base metadata
+        file_hash = hashlib.sha256(pdf_bytes).hexdigest()[:32]
         base_metadata: Dict[str, Any] = {
             "created_at": datetime.utcnow().isoformat(),
             "content_type": "pdf",
+            "file_hash": file_hash,
             "file_path": str(stored_path),
             "file_filename": stored_filename,
             "page_count": parsed.page_count,
@@ -660,10 +762,136 @@ class Memory:
             "status": "added",
         }
 
+    def feedback(
+        self,
+        query: str,
+        memory_id: str,
+        signal: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Record feedback on a search result.
+
+        Args:
+            query: The search query that produced this result.
+            memory_id: The memory ID being rated.
+            signal: Feedback signal - "positive" or "negative".
+            user_id: Optional user identifier.
+
+        Returns:
+            Dict with feedback_id and status.
+        """
+        if signal not in ("positive", "negative"):
+            raise ValueError("Signal must be 'positive' or 'negative'")
+
+        feedback_record = Feedback(
+            query=query,
+            memory_id=memory_id,
+            signal=signal,
+            user_id=user_id,
+        )
+
+        feedback_id = self.feedback_store.add(feedback_record)
+
+        return {
+            "feedback_id": feedback_id,
+            "status": "recorded",
+        }
+
+    def get_feedback_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get feedback statistics.
+
+        Args:
+            user_id: Optional user ID to filter by.
+
+        Returns:
+            Dict with feedback statistics.
+        """
+        return self.feedback_store.get_stats(user_id=user_id)
+
     def _generate_id(self, content: str) -> str:
         """Generate a unique memory ID."""
         unique_str = f"{content}{datetime.utcnow().isoformat()}{uuid.uuid4()}"
         return hashlib.sha256(unique_str.encode()).hexdigest()[:16]
+
+    def _compute_content_hash(self, content: str) -> str:
+        """Compute a deterministic hash of content for duplicate detection."""
+        # Normalize content: strip whitespace, lowercase
+        normalized = content.strip().lower()
+        return hashlib.sha256(normalized.encode()).hexdigest()[:32]
+
+    def find_duplicates(
+        self,
+        content: str,
+        threshold: float = 0.95,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Find potential duplicate memories for the given content.
+
+        Uses a hybrid approach:
+        1. Exact match via content hash
+        2. Semantic similarity via embeddings
+
+        Args:
+            content: The content to check for duplicates.
+            threshold: Similarity threshold (0-1). Default 0.95.
+            limit: Maximum number of duplicates to return.
+
+        Returns:
+            List of potential duplicate memories with similarity scores.
+        """
+        if not content or not content.strip():
+            return []
+
+        duplicates = []
+        content_hash = self._compute_content_hash(content)
+
+        # 1. Check for exact hash match
+        try:
+            hash_results = self.collection.get(
+                where={"content_hash": content_hash},
+                include=["documents", "metadatas"],
+            )
+            if hash_results["ids"]:
+                for i, memory_id in enumerate(hash_results["ids"]):
+                    duplicates.append({
+                        "id": memory_id,
+                        "content": hash_results["documents"][i] if hash_results["documents"] else "",
+                        "metadata": hash_results["metadatas"][i] if hash_results["metadatas"] else {},
+                        "similarity": 1.0,
+                        "match_type": "exact",
+                    })
+                # Return early if exact match found
+                return duplicates[:limit]
+        except Exception:
+            # content_hash field might not exist in older memories
+            pass
+
+        # 2. Check for semantic similarity
+        query_embedding = self.embedding_service.embed_text(content)
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=limit,
+            include=["documents", "metadatas", "distances"],
+        )
+
+        if results["ids"] and results["ids"][0]:
+            for i, memory_id in enumerate(results["ids"][0]):
+                distance = results["distances"][0][i] if results["distances"] else 0
+                similarity = 1 / (1 + distance)
+
+                if similarity >= threshold:
+                    duplicates.append({
+                        "id": memory_id,
+                        "content": results["documents"][0][i] if results["documents"] else "",
+                        "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
+                        "similarity": similarity,
+                        "match_type": "semantic",
+                    })
+
+        return duplicates[:limit]
 
     def _build_where_clause(
         self,

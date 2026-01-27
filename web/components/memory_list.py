@@ -135,7 +135,7 @@ def render_memory_item(
                         Path(image_path).unlink()
 
                     memory_client.delete(memory_id)
-                    st.toast("Memory deleted!", icon="")
+                    st.toast("Memory deleted!", icon="🗑️")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to delete: {e}")
