@@ -98,6 +98,34 @@ def render_text_form(memory_client: Memory) -> None:
                     st.success(f"Memory added! Created {result['chunks_created']} chunks.")
                 else:
                     st.success(f"Memory added! ID: {result['memory_id']}")
+
+                # Display extracted items for chat content
+                extracted_items = result.get("extracted_items")
+                if extracted_items:
+                    added = [i for i in extracted_items if i["status"] == "added"]
+                    dupes = [i for i in extracted_items if i["status"] == "duplicate"]
+                    st.info(
+                        f"Chat detected! Extracted {len(added)} new items"
+                        f" ({len(dupes)} duplicates skipped)."
+                    )
+
+                    # Show outcome summary prominently
+                    outcome = result.get("outcome")
+                    if outcome:
+                        st.markdown(f"**Outcome:** {outcome}")
+
+                    # Group remaining items by category
+                    by_category: dict[str, list[str]] = {}
+                    for item in extracted_items:
+                        cat = item["category"]
+                        if cat == "outcome":
+                            continue
+                        by_category.setdefault(cat, []).append(item["content"])
+                    for category, items in by_category.items():
+                        with st.expander(f"{category.capitalize()} ({len(items)})"):
+                            for item_text in items:
+                                st.markdown(f"- {item_text}")
+
                 st.toast("Memory added!", icon="✅")
             except Exception as e:
                 st.error(f"Failed to add memory: {e}")

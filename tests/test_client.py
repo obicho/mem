@@ -1,9 +1,13 @@
 """Tests for Memory client."""
 
+import json
 import os
 import shutil
 import pytest
 from unittest.mock import MagicMock, patch
+
+from app.core.chat_summarizer import ChatSummaryResult
+from app.core.chunker import detect_content_type, ContentType
 
 
 @pytest.fixture
@@ -261,3 +265,213 @@ def test_find_duplicates(memory_client):
     assert len(duplicates) == 1
     assert duplicates[0]["match_type"] == "exact"
     assert duplicates[0]["similarity"] == 1.0
+
+
+# --- Chat summarization integration tests ---
+
+CHAT_CONTENT = (
+    "alice: We should use PostgreSQL for the new project.\n"
+    "bob: Agreed. The deadline is next Friday.\n"
+    "alice: I think React is better than Vue for this.\n"
+    "bob: Let's aim for 99.9% uptime.\n"
+    "alice: I prefer deploying on Fridays.\n"
+    "bob: TODO: set up CI pipeline by Wednesday.\n"
+)
+
+SUMMARY_RESULT = ChatSummaryResult(
+    outcome="The team decided to use PostgreSQL and React, targeting 99.9% uptime with CI setup by Wednesday.",
+    facts=["The project deadline is next Friday."],
+    decisions=["The team decided to use PostgreSQL for the new project."],
+    opinions=["Alice thinks React is better than Vue."],
+    tasks=["Bob will set up the CI pipeline by Wednesday."],
+    goals=["The team aims for 99.9% uptime."],
+    preferences=["Alice prefers deploying on Fridays."],
+)
+
+
+def test_add_chat_triggers_summarization(memory_client):
+    """Chat content triggers extraction with outcome and items are stored."""
+    with patch.object(memory_client.chat_summarizer, "extract", return_value=SUMMARY_RESULT):
+        result = memory_client.add(
+            CHAT_CONTENT,
+            user_id="test_user",
+            content_type="chat",
+        )
+
+    assert result["status"] == "added"
+    assert "extracted_items" in result
+    assert "outcome" in result
+    assert result["outcome"] == SUMMARY_RESULT.outcome
+
+    extracted = result["extracted_items"]
+    # 1 outcome + 6 category items = 7
+    assert len(extracted) == 7
+    added_items = [i for i in extracted if i["status"] == "added"]
+    assert len(added_items) == 7
+
+    categories = {i["category"] for i in extracted}
+    assert categories == {"outcome", "facts", "decisions", "opinions", "tasks", "goals", "preferences"}
+
+
+def test_add_non_chat_does_not_trigger_summarization(memory_client):
+    """Document content should not trigger chat extraction."""
+    doc_content = (
+        "This is a formal document about project architecture.\n\n"
+        "The system uses a microservices pattern with REST APIs.\n\n"
+        "Each service is independently deployable."
+    )
+    with patch.object(memory_client.chat_summarizer, "extract") as mock_extract:
+        result = memory_client.add(
+            doc_content,
+            user_id="test_user",
+            content_type="document",
+        )
+
+    assert result["status"] == "added"
+    assert "extracted_items" not in result
+    mock_extract.assert_not_called()
+
+
+def test_chat_summarization_failure_does_not_block_storage(memory_client):
+    """Raw chat chunks are stored even when summarization fails."""
+    with patch.object(
+        memory_client.chat_summarizer,
+        "extract",
+        side_effect=RuntimeError("LLM unavailable"),
+    ):
+        result = memory_client.add(
+            CHAT_CONTENT,
+            user_id="test_user",
+            content_type="chat",
+        )
+
+    # Raw storage succeeded
+    assert result["status"] == "added"
+    # No extracted items key since it failed gracefully
+    assert "extracted_items" not in result
+    # Verify raw content is searchable
+    assert memory_client.count() >= 1
+
+
+def test_extracted_items_have_group_id_linking(memory_client):
+    """Extracted items share group_id with raw chunks and have correct metadata."""
+    with patch.object(memory_client.chat_summarizer, "extract", return_value=SUMMARY_RESULT):
+        result = memory_client.add(
+            CHAT_CONTENT,
+            user_id="test_user",
+            content_type="chat",
+        )
+
+    extracted = result["extracted_items"]
+    # Get the first added item
+    added_item = next(i for i in extracted if i["status"] == "added")
+
+    # Retrieve from storage and verify metadata
+    memory = memory_client.get(added_item["memory_id"])
+    assert memory is not None
+    meta = memory["metadata"]
+    assert meta["content_type"] == "chat_extract"
+    assert meta["extract_category"] in {
+        "outcome", "facts", "decisions", "opinions", "tasks", "goals", "preferences",
+    }
+    assert meta["source_content_type"] == "chat"
+    assert "group_id" in meta
+
+    # Verify group_id links to raw chunks — all extracted items share the same group_id
+    group_id = meta["group_id"]
+    for item in extracted:
+        if item["status"] == "added":
+            m = memory_client.get(item["memory_id"])
+            assert m["metadata"]["group_id"] == group_id
+
+
+# --- Content type detection tests ---
+
+def test_detect_iso_datetime_dash_speaker_as_chat():
+    """ISO date + time + em-dash + speaker pattern is detected as chat."""
+    text = (
+        "2026-01-26 16:42 — Alex: We need to decide which channel to use.\n\n"
+        "2026-01-26 16:45 — Maya: LINE is way more common here.\n\n"
+        "2026-01-26 16:48 — Ken: LINE is better for early pilots.\n"
+    )
+    assert detect_content_type(text) == ContentType.CHAT
+
+
+def test_detect_iso_datetime_hyphen_speaker_as_chat():
+    """ISO date + time + regular dash + speaker pattern is detected as chat."""
+    text = (
+        "2026-01-26 16:42 - Alex: First message.\n"
+        "2026-01-26 16:45 - Maya: Second message.\n"
+    )
+    assert detect_content_type(text) == ContentType.CHAT
+
+
+# --- Search collapse tests ---
+
+def test_search_collapses_chat_results_to_outcome(memory_client):
+    """Search returns outcome instead of raw chat chunks, with related_memories."""
+    with patch.object(memory_client.chat_summarizer, "extract", return_value=SUMMARY_RESULT):
+        add_result = memory_client.add(
+            CHAT_CONTENT,
+            user_id="test_user",
+            content_type="chat",
+        )
+
+    assert "outcome" in add_result
+
+    # Search should return the outcome, not the raw chunks
+    results = memory_client.search("PostgreSQL", user_id="test_user")
+    assert len(results) >= 1
+
+    # Find the chat-related result — it should be the outcome
+    chat_results = [
+        r for r in results
+        if r["metadata"].get("content_type") == "chat_extract"
+        and r["metadata"].get("extract_category") == "outcome"
+    ]
+    assert len(chat_results) == 1
+    outcome_result = chat_results[0]
+
+    # Should have related_memories linking to sibling items
+    assert "related_memories" in outcome_result
+    assert len(outcome_result["related_memories"]) > 0
+
+    # Related memories should not include the outcome itself
+    related_ids = {r["id"] for r in outcome_result["related_memories"]}
+    assert outcome_result["id"] not in related_ids
+
+
+def test_search_does_not_collapse_non_chat_results(memory_client):
+    """Non-chat results pass through search without collapsing."""
+    memory_client.add("PostgreSQL is a relational database.", user_id="test_user")
+    memory_client.add("PostgreSQL supports JSON columns.", user_id="test_user")
+
+    results = memory_client.search("PostgreSQL", user_id="test_user")
+    assert len(results) == 2
+    # Neither should have related_memories
+    for r in results:
+        assert "related_memories" not in r
+
+
+def test_get_related_memories(memory_client):
+    """get_related_memories returns all siblings for a group_id."""
+    with patch.object(memory_client.chat_summarizer, "extract", return_value=SUMMARY_RESULT):
+        add_result = memory_client.add(
+            CHAT_CONTENT,
+            user_id="test_user",
+            content_type="chat",
+        )
+
+    # Get the group_id from any extracted item
+    extracted = add_result["extracted_items"]
+    first_added = next(i for i in extracted if i["status"] == "added")
+    mem = memory_client.get(first_added["memory_id"])
+    group_id = mem["metadata"]["group_id"]
+
+    related = memory_client.get_related_memories(group_id)
+    # Should include raw chunk(s) + outcome + 6 category items
+    assert len(related) >= 7
+
+    # All should share the same group_id
+    for r in related:
+        assert r["metadata"]["group_id"] == group_id

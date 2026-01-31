@@ -1,5 +1,7 @@
 """FastAPI dependencies for authentication and database injection."""
 
+from functools import lru_cache
+
 from fastapi import Depends, Header, HTTPException, status
 
 from app.config import Settings, get_settings
@@ -22,3 +24,11 @@ async def verify_api_key(
 def get_db() -> ChromaDBClient:
     """Get database client dependency."""
     return get_db_client()
+
+
+@lru_cache()
+def get_memory_client():
+    """Get Memory client singleton."""
+    from app.client import Memory
+    settings = get_settings()
+    return Memory(api_key=settings.openai_api_key)

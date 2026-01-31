@@ -2,10 +2,9 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.core.embeddings import embed_text
-from app.db.chromadb import ChromaDBClient
-from app.dependencies import get_db, verify_api_key
-from app.models.schemas import APIResponse, SearchRequest, SearchResponse
+from app.client import Memory
+from app.dependencies import get_memory_client, verify_api_key
+from app.models.schemas import APIResponse, SearchRequest
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -14,14 +13,14 @@ router = APIRouter(prefix="/search", tags=["search"])
     "",
     response_model=APIResponse,
     summary="Semantic search",
-    description="Search emails using natural language queries",
+    description="Search memories using natural language queries",
 )
-async def search_emails(
+async def search_memories(
     request: SearchRequest,
     _api_key: str = Depends(verify_api_key),
-    db: ChromaDBClient = Depends(get_db),
+    memory: Memory = Depends(get_memory_client),
 ) -> APIResponse:
-    """Perform semantic search across email content."""
+    """Perform semantic search across all memories."""
     if not request.query.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -29,24 +28,22 @@ async def search_emails(
         )
 
     try:
-        query_embedding = embed_text(request.query)
+        results = memory.search(
+            query=request.query,
+            limit=request.n_results,
+            filters=request.filters or None,
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate embedding: {str(e)}",
+            detail=f"Search failed: {str(e)}",
         )
-
-    results = db.search(
-        query_embedding=query_embedding,
-        n_results=request.n_results,
-        filters=request.filters or None,
-    )
 
     return APIResponse(
         success=True,
-        data=SearchResponse(
-            query=request.query,
-            results=results,
-            total=len(results),
-        ),
+        data={
+            "query": request.query,
+            "results": results,
+            "total": len(results),
+        },
     )

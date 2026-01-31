@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
+from app.core.chat_summarizer import ChatSummarizer
 from app.core.chunker import chunk_content, detect_content_type, ContentType
 from app.core.embeddings import EmbeddingService
 from app.core.feedback import Feedback, FeedbackStore
@@ -68,6 +69,7 @@ class Memory:
         """
         self.embedding_service = EmbeddingService(api_key=api_key, model=embedding_model)
         self.vision_service = VisionService(api_key=api_key, model=vision_model)
+        self.chat_summarizer = ChatSummarizer(api_key=api_key, model=vision_model)
         self.pdf_parser = PDFParser()
         self.feedback_store = FeedbackStore(db_path=feedback_db)
         self.image_dir = Path(image_dir)
@@ -188,18 +190,72 @@ class Memory:
             )
             memory_ids.append(chunk_id)
 
+        # Build base result
         if len(memory_ids) == 1:
-            return {
+            result: Dict[str, Any] = {
                 "memory_id": memory_ids[0],
                 "status": "added",
             }
         else:
-            return {
+            result = {
                 "memory_ids": memory_ids,
                 "group_id": group_id,
                 "chunks_created": len(memory_ids),
                 "status": "added",
             }
+
+        # Chat extraction: extract structured items from chat content
+        detected_type = chunks[0]["metadata"].get("content_type") if chunks else None
+        if detected_type == ContentType.CHAT.value:
+            try:
+                summary = self.chat_summarizer.extract(content)
+                # Use the group_id from chunks, or generate one to link extracts to raw chunks
+                link_group_id = group_id or self._generate_id(content)
+                if group_id is None and len(memory_ids) == 1:
+                    # Retroactively set group_id on the single raw chunk
+                    existing_meta = chunks[0]["metadata"].copy()
+                    existing_meta["group_id"] = link_group_id
+                    self.collection.update(
+                        ids=[memory_ids[0]],
+                        metadatas=[existing_meta],
+                    )
+
+                extracted_items: List[Dict[str, Any]] = []
+
+                # Store outcome as a memory if present
+                if summary.outcome:
+                    outcome_result = self._upsert_extracted_item(
+                        content=summary.outcome,
+                        category="outcome",
+                        group_id=link_group_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        run_id=run_id,
+                        dedupe=dedupe,
+                        dedupe_threshold=dedupe_threshold,
+                    )
+                    extracted_items.append(outcome_result)
+                    result["outcome"] = summary.outcome
+
+                for item in summary.all_items():
+                    item_result = self._upsert_extracted_item(
+                        content=item.content,
+                        category=item.category,
+                        group_id=link_group_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        run_id=run_id,
+                        dedupe=dedupe,
+                        dedupe_threshold=dedupe_threshold,
+                    )
+                    extracted_items.append(item_result)
+
+                result["extracted_items"] = extracted_items
+            except Exception:
+                # Summarization failure must not block raw storage
+                pass
+
+        return result
 
     def search(
         self,
@@ -274,7 +330,78 @@ class Memory:
             memories.sort(key=lambda x: x["score"], reverse=True)
             memories = memories[:limit]
 
+        # Collapse chat-related results: replace raw chat chunks and
+        # individual extracts with a single outcome entry per group_id,
+        # carrying links to the sibling memories.
+        memories = self._collapse_chat_results(memories)
+
         return memories
+
+    def _collapse_chat_results(
+        self, memories: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Collapse chat-related results into outcome entries.
+
+        For each ``group_id`` that appears in chat / chat_extract results,
+        keep only the outcome memory (or the highest-scored sibling when
+        no outcome was stored yet) and attach ``related_ids`` so the UI
+        can link to the remaining pieces.
+
+        Non-chat results pass through unchanged.
+        """
+        collapsed: List[Dict[str, Any]] = []
+        seen_group_ids: dict[str, int] = {}  # group_id → index in collapsed
+
+        for mem in memories:
+            meta = mem.get("metadata", {})
+            content_type = meta.get("content_type", "")
+            group_id = meta.get("group_id", "")
+
+            is_chat_related = content_type in ("chat", "chat_extract")
+
+            if not is_chat_related or not group_id:
+                collapsed.append(mem)
+                continue
+
+            is_outcome = meta.get("extract_category") == "outcome"
+
+            if group_id not in seen_group_ids:
+                # First time seeing this group — fetch all siblings once
+                related = self.get_related_memories(group_id)
+                related_ids = [
+                    {"id": r["id"], "content_type": r["metadata"].get("content_type", ""),
+                     "extract_category": r["metadata"].get("extract_category", "")}
+                    for r in related if r["id"] != mem["id"]
+                ]
+
+                # If this isn't the outcome, try to find and swap in the outcome
+                if not is_outcome:
+                    outcome_mem = next(
+                        (r for r in related
+                         if r["metadata"].get("extract_category") == "outcome"),
+                        None,
+                    )
+                    if outcome_mem:
+                        # Replace content with outcome, keep the best score
+                        mem = {
+                            **mem,
+                            "id": outcome_mem["id"],
+                            "content": outcome_mem["content"],
+                            "metadata": outcome_mem["metadata"],
+                        }
+                        related_ids = [
+                            {"id": r["id"],
+                             "content_type": r["metadata"].get("content_type", ""),
+                             "extract_category": r["metadata"].get("extract_category", "")}
+                            for r in related if r["id"] != outcome_mem["id"]
+                        ]
+
+                mem["related_memories"] = related_ids
+                seen_group_ids[group_id] = len(collapsed)
+                collapsed.append(mem)
+            # else: already have an entry for this group — skip duplicate
+
+        return collapsed
 
     def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -809,6 +936,105 @@ class Memory:
             Dict with feedback statistics.
         """
         return self.feedback_store.get_stats(user_id=user_id)
+
+    def get_related_memories(self, group_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all memories sharing a group_id.
+
+        Args:
+            group_id: The group ID linking related memories.
+
+        Returns:
+            List of memory dicts with id, content, and metadata.
+        """
+        if not group_id:
+            return []
+
+        try:
+            results = self.collection.get(
+                where={"group_id": group_id},
+                include=["documents", "metadatas"],
+            )
+        except Exception:
+            return []
+
+        memories = []
+        if results["ids"]:
+            for i, memory_id in enumerate(results["ids"]):
+                memories.append({
+                    "id": memory_id,
+                    "content": results["documents"][i] if results["documents"] else "",
+                    "metadata": results["metadatas"][i] if results["metadatas"] else {},
+                })
+        return memories
+
+    def _upsert_extracted_item(
+        self,
+        content: str,
+        category: str,
+        group_id: str,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        dedupe: bool = True,
+        dedupe_threshold: float = 0.98,
+    ) -> Dict[str, Any]:
+        """Store a single extracted item from chat summarization.
+
+        Args:
+            content: The extracted item text.
+            category: Extraction category (facts, decisions, etc.).
+            group_id: Shared group ID linking to raw chat chunks.
+            user_id: Optional user identifier.
+            agent_id: Optional agent identifier.
+            run_id: Optional run identifier.
+            dedupe: Whether to check for duplicates.
+            dedupe_threshold: Similarity threshold for dedup.
+
+        Returns:
+            Dict with memory_id, category, content, and status.
+        """
+        if dedupe:
+            duplicates = self.find_duplicates(content, threshold=dedupe_threshold, limit=1)
+            if duplicates:
+                return {
+                    "memory_id": duplicates[0]["id"],
+                    "category": category,
+                    "content": content,
+                    "status": "duplicate",
+                }
+
+        item_metadata: Dict[str, Any] = {
+            "created_at": datetime.utcnow().isoformat(),
+            "content_hash": self._compute_content_hash(content),
+            "content_type": "chat_extract",
+            "extract_category": category,
+            "source_content_type": "chat",
+            "group_id": group_id,
+        }
+        if user_id:
+            item_metadata["user_id"] = user_id
+        if agent_id:
+            item_metadata["agent_id"] = agent_id
+        if run_id:
+            item_metadata["run_id"] = run_id
+
+        memory_id = self._generate_id(content)
+        embedding = self.embedding_service.embed_text(content)
+
+        self.collection.add(
+            ids=[memory_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[item_metadata],
+        )
+
+        return {
+            "memory_id": memory_id,
+            "category": category,
+            "content": content,
+            "status": "added",
+        }
 
     def _generate_id(self, content: str) -> str:
         """Generate a unique memory ID."""

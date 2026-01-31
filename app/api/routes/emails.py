@@ -1,17 +1,89 @@
 """Email CRUD endpoints."""
 
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
+from app.client import Memory
 from app.core.chunker import ContentType, chunk_content
 from app.core.email_parser import parse_email
 from app.core.embeddings import embed_batch
 from app.db.chromadb import ChromaDBClient
-from app.dependencies import get_db, verify_api_key
-from app.models.schemas import APIResponse, EmailChunk, EmailListResponse, IngestResponse
+from app.dependencies import get_db, get_memory_client, verify_api_key
+from app.models.schemas import (
+    APIResponse,
+    EmailChunk,
+    EmailListResponse,
+    InboundEmailPayload,
+    IngestResponse,
+)
 
 router = APIRouter(prefix="/emails", tags=["emails"])
+
+
+@router.post(
+    "/inbound",
+    response_model=APIResponse,
+    summary="Ingest email from JSON payload",
+    description="Process a normalized email JSON payload and add to memory",
+)
+async def ingest_inbound_email(
+    payload: InboundEmailPayload,
+    _api_key: str = Depends(verify_api_key),
+    memory: Memory = Depends(get_memory_client),
+) -> APIResponse:
+    """Ingest an email from a normalized JSON payload into memory."""
+    if not payload.body or not payload.body.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email body cannot be empty",
+        )
+
+    # Generate message_id if not provided
+    message_id = payload.message_id or f"inbound-{uuid.uuid4().hex[:12]}@memory"
+
+    # Build email metadata (ChromaDB only accepts scalar values)
+    email_metadata = {
+        "message_id": message_id,
+        "subject": payload.subject,
+        "sender": payload.sender,
+        "recipients": ", ".join(payload.recipients) if payload.recipients else "",
+        "cc": ", ".join(payload.cc) if payload.cc else "",
+    }
+    if payload.date:
+        email_metadata["date"] = payload.date.isoformat()
+    if payload.thread_id:
+        email_metadata["thread_id"] = payload.thread_id
+
+    # Prepend subject for better context
+    content = payload.body
+    if payload.subject:
+        content = f"Subject: {payload.subject}\n\n{payload.body}"
+
+    try:
+        result = memory.add(
+            content=content,
+            user_id=payload.user_id,
+            agent_id=payload.agent_id,
+            metadata=email_metadata,
+            content_type="email",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to store email: {str(e)}",
+        )
+
+    return APIResponse(
+        success=True,
+        data={
+            "email_id": message_id,
+            "memory_id": result.get("memory_id") or result.get("memory_ids", [None])[0],
+            "chunks_created": result.get("chunks_created", 1),
+            "status": result.get("status", "added"),
+        },
+    )
 
 
 @router.post(

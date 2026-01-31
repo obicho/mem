@@ -212,8 +212,28 @@ def render_search_result(
             st.image(image_path, width=300)
 
         # Content preview (caption for images, text for others)
-        preview = content[:200] + "..." if len(content) > 200 else content
-        st.write(preview)
+        is_chat_outcome = content_type == "chat_extract" and metadata.get("extract_category") == "outcome"
+        if is_chat_outcome:
+            st.markdown(f"**Outcome:** {content}")
+        else:
+            preview = content[:200] + "..." if len(content) > 200 else content
+            st.write(preview)
+
+        # Related memories for collapsed chat results
+        related_memories = result.get("related_memories")
+        if related_memories:
+            with st.expander(f"Related memories ({len(related_memories)})"):
+                for rel in related_memories:
+                    rel_id = rel["id"]
+                    rel_type = rel.get("content_type", "")
+                    rel_cat = rel.get("extract_category", "")
+                    label = rel_cat if rel_cat else rel_type
+                    rel_mem = memory_client.get(rel_id)
+                    if rel_mem:
+                        rel_preview = rel_mem["content"][:120] + "..." if len(rel_mem["content"]) > 120 else rel_mem["content"]
+                        st.markdown(f"- **{label}**: {rel_preview}  \n`{rel_id}`")
+                    else:
+                        st.markdown(f"- **{label}**: `{rel_id}`")
 
         # Expandable full view
         with st.expander("View Full Details"):

@@ -84,6 +84,21 @@ class EmailSummary(BaseModel):
     snippet: Optional[str] = None
 
 
+class InboundEmailPayload(BaseModel):
+    """Normalized email payload for inbound webhook."""
+
+    message_id: Optional[str] = None
+    subject: Optional[str] = None
+    sender: str
+    recipients: List[str] = Field(default_factory=list)
+    cc: List[str] = Field(default_factory=list)
+    body: str
+    date: Optional[datetime] = None
+    thread_id: Optional[str] = None
+    user_id: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
 class EmailListResponse(BaseModel):
     """Paginated list of emails."""
 

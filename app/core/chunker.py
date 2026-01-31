@@ -9,7 +9,7 @@ from typing import Any
 # Default chunk settings by content type
 CHUNK_SETTINGS = {
     "email": {"size": 1500, "overlap": 150},
-    "chat": {"size": 800, "overlap": 0},  # No overlap for chat windows
+    "chat": {"size": 1500, "overlap": 2},  # overlap = number of speaker turns carried over
     "document": {"size": 2000, "overlap": 200},
 }
 
@@ -68,6 +68,11 @@ def detect_content_type(text: str, metadata: dict[str, Any] | None = None) -> Co
     # Timestamp + username pattern: "[10:30] alice: " or "10:30 AM alice:"
     chat_timestamp_pattern = r"^\[?\d{1,2}:\d{2}(?:\s*[AP]M)?\]?\s+\w+:"
     if re.search(chat_timestamp_pattern, text, re.MULTILINE):
+        return ContentType.CHAT
+
+    # ISO date + time + separator + speaker: "2026-01-26 16:42 — Alex:" or "2026-01-26 16:42 - Alex:"
+    iso_chat_pattern = r"^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*[\u2014\u2013\-]+\s*\w+:"
+    if re.search(iso_chat_pattern, text, re.MULTILINE):
         return ContentType.CHAT
 
     # Slack/Discord style: "<@user>" or "@user:"
@@ -243,30 +248,53 @@ class EmailChunker(ChunkingStrategy):
 
 
 class ChatChunker(ChunkingStrategy):
-    """Chunking strategy optimized for chat messages."""
+    """Chunking strategy optimized for chat messages.
+
+    Groups speaker turns into windows of ``min_turns`` to ``max_turns``
+    exchanges. Consecutive windows share ``overlap_turns`` trailing turns
+    so that each chunk starts with enough context to be coherent on its own.
+    A hard ``chunk_size`` character limit forces a split even if the turn
+    count hasn't been reached.
+    """
 
     def __init__(
         self,
         chunk_size: int = CHUNK_SETTINGS["chat"]["size"],
-        max_messages: int = 10,
-        time_gap_minutes: int = 30,
+        min_turns: int = 5,
+        max_turns: int = 7,
+        overlap_turns: int = CHUNK_SETTINGS["chat"]["overlap"],
     ):
         self.chunk_size = chunk_size
-        self.max_messages = max_messages
-        self.time_gap_minutes = time_gap_minutes
+        self.min_turns = min_turns
+        self.max_turns = max_turns
+        self.overlap_turns = overlap_turns
 
     def chunk(self, text: str, metadata: dict[str, Any] | None = None) -> list[dict]:
         metadata = metadata or {}
 
-        # Parse messages from text
-        messages = self._parse_messages(text)
+        # Parse speaker turns from text
+        turns = self._parse_turns(text)
 
-        if not messages:
+        if not turns:
             # Fall back to simple chunking if parsing fails
             return self._simple_chunk(text, metadata)
 
-        # Group messages into conversation windows
-        windows = self._create_windows(messages)
+        # If everything fits in one window, return as a single chunk
+        total_len = sum(len(t) for t in turns) + len(turns) - 1
+        if len(turns) <= self.max_turns and total_len <= self.chunk_size:
+            return [{
+                "content": "\n".join(turns),
+                "metadata": {
+                    **metadata,
+                    "chunk_index": 0,
+                    "total_chunks": 1,
+                    "content_type": "chat",
+                    "message_count": len(turns),
+                },
+            }]
+
+        # Group turns into overlapping windows
+        windows = self._create_windows(turns)
 
         # Build chunk objects
         chunks = []
@@ -283,70 +311,83 @@ class ChatChunker(ChunkingStrategy):
 
         return chunks
 
-    def _parse_messages(self, text: str) -> list[str]:
-        """Parse individual messages from chat text."""
-        lines = text.strip().split("\n")
-        messages = []
-        current_message: list[str] = []
+    def _parse_turns(self, text: str) -> list[str]:
+        """Parse individual speaker turns from chat text.
 
-        # Patterns that indicate start of new message
-        message_start_patterns = [
+        A turn is one or more consecutive lines that belong to the same
+        message (multi-line messages are kept together).
+        """
+        lines = text.strip().split("\n")
+        turns: list[str] = []
+        current_turn: list[str] = []
+
+        # Patterns that indicate start of new speaker turn
+        turn_start_patterns = [
             r"^\[?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?\]?\s+\w+:",  # timestamp + user
+            r"^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*[\u2014\u2013\-]+\s*\w+:",  # ISO date + dash + user
             r"^<@?\w+>:",  # Slack style
             r"^\w{2,20}:\s",  # Simple "user: message"
-            r"^\[\d{4}-\d{2}-\d{2}",  # ISO date prefix
+            r"^\[?\d{4}-\d{2}-\d{2}",  # ISO date prefix
         ]
 
         for line in lines:
-            is_new_message = any(
-                re.match(pattern, line.strip()) for pattern in message_start_patterns
+            is_new_turn = any(
+                re.match(pattern, line.strip()) for pattern in turn_start_patterns
             )
 
-            if is_new_message and current_message:
-                messages.append("\n".join(current_message))
-                current_message = []
+            if is_new_turn and current_turn:
+                turns.append("\n".join(current_turn))
+                current_turn = []
 
             if line.strip():
-                current_message.append(line)
+                current_turn.append(line)
 
-        if current_message:
-            messages.append("\n".join(current_message))
+        if current_turn:
+            turns.append("\n".join(current_turn))
 
-        return messages
+        return turns
 
-    def _create_windows(self, messages: list[str]) -> list[list[str]]:
-        """Group messages into conversation windows."""
-        if not messages:
+    def _create_windows(self, turns: list[str]) -> list[list[str]]:
+        """Group speaker turns into overlapping conversation windows.
+
+        Each window contains ``max_turns`` turns (or fewer for the last
+        window). Consecutive windows share ``overlap_turns`` trailing turns
+        from the previous window so the next chunk starts with context.
+        A hard ``chunk_size`` character limit forces an early split.
+        """
+        if not turns:
             return []
 
         windows: list[list[str]] = []
-        current_window: list[str] = []
-        current_length = 0
+        start = 0
 
-        for message in messages:
-            message_len = len(message)
+        while start < len(turns):
+            window: list[str] = []
+            window_len = 0
 
-            # Start new window if size or count exceeded
-            should_split = (
-                current_length + message_len > self.chunk_size
-                or len(current_window) >= self.max_messages
-            ) and current_window
+            for i in range(start, len(turns)):
+                turn_len = len(turns[i])
+                # Force split if adding this turn exceeds size (but always
+                # include at least min_turns if possible)
+                if window and (
+                    len(window) >= self.max_turns
+                    or (window_len + turn_len + 1 > self.chunk_size
+                        and len(window) >= self.min_turns)
+                ):
+                    break
+                window.append(turns[i])
+                window_len += turn_len + 1  # +1 for newline
 
-            if should_split:
-                windows.append(current_window)
-                current_window = []
-                current_length = 0
+            windows.append(window)
 
-            current_window.append(message)
-            current_length += message_len + 1  # +1 for newline
-
-        if current_window:
-            windows.append(current_window)
+            # Advance past the turns we consumed, minus overlap
+            consumed = len(window)
+            start += max(consumed - self.overlap_turns, 1)
 
         return windows
 
     def _simple_chunk(self, text: str, metadata: dict[str, Any]) -> list[dict]:
-        """Fallback simple chunking by lines."""
+        """Fallback simple chunking by lines when turn parsing fails."""
         lines = text.strip().split("\n")
         chunks = []
         current_chunk: list[str] = []
