@@ -20,6 +20,18 @@ def render_memory_list(memory_client: Memory, user_id_filter: str | None = None)
 
     page_size = 10
 
+    # Content type filter - reset page when filter changes
+    prev_filter = st.session_state.get("prev_content_filter", "All")
+    content_filter = st.radio(
+        "Filter by type",
+        options=["All", "Lists & Tables"],
+        horizontal=True,
+        key="content_type_filter",
+    )
+    if content_filter != prev_filter:
+        st.session_state.page = 0
+        st.session_state.prev_content_filter = content_filter
+
     # Bulk actions
     col1, col2 = st.columns([3, 1])
 
@@ -28,11 +40,14 @@ def render_memory_list(memory_client: Memory, user_id_filter: str | None = None)
             st.rerun()
 
     try:
-        # Get memories
-        memories = memory_client.get_all(
-            user_id=user_id_filter,
-            limit=100,
-        )
+        # Get memories based on filter
+        if content_filter == "Lists & Tables":
+            memories = memory_client.get_lists(user_id=user_id_filter, limit=100)
+        else:
+            memories = memory_client.get_all(
+                user_id=user_id_filter,
+                limit=100,
+            )
 
         if not memories:
             st.info("No memories found." + (" Try removing the user filter." if user_id_filter else ""))

@@ -15,6 +15,7 @@ from app.core.chat_summarizer import ChatSummarizer
 from app.core.chunker import chunk_content, detect_content_type, ContentType
 from app.core.embeddings import EmbeddingService
 from app.core.feedback import Feedback, FeedbackStore
+from app.core.list_classifier import ListClassifier, ListClassification, detect_list_or_table
 from app.core.pdf_parser import PDFParser
 from app.core.vision import VisionService
 
@@ -70,6 +71,7 @@ class Memory:
         self.embedding_service = EmbeddingService(api_key=api_key, model=embedding_model)
         self.vision_service = VisionService(api_key=api_key, model=vision_model)
         self.chat_summarizer = ChatSummarizer(api_key=api_key, model=vision_model)
+        self.list_classifier = ListClassifier(api_key=api_key, model=vision_model)
         self.pdf_parser = PDFParser()
         self.feedback_store = FeedbackStore(db_path=feedback_db)
         self.image_dir = Path(image_dir)
@@ -147,6 +149,18 @@ class Memory:
             base_metadata["run_id"] = run_id
         if metadata:
             base_metadata.update(metadata)
+
+        # Check for list/table content - don't chunk, classify instead
+        list_info = detect_list_or_table(content)
+        if list_info:
+            return self._add_list(
+                content=content,
+                list_info=list_info,
+                base_metadata=base_metadata,
+                memory_id=memory_id,
+                dedupe=dedupe,
+                dedupe_threshold=dedupe_threshold,
+            )
 
         # Chunk content if enabled
         if chunking:
@@ -967,6 +981,298 @@ class Memory:
                     "metadata": results["metadatas"][i] if results["metadatas"] else {},
                 })
         return memories
+
+    def _add_list(
+        self,
+        content: str,
+        list_info: Dict[str, Any],
+        base_metadata: Dict[str, Any],
+        memory_id: Optional[str] = None,
+        dedupe: bool = True,
+        dedupe_threshold: float = 0.98,
+    ) -> Dict[str, Any]:
+        """Store a list/table as a single memory with classification.
+
+        Lists and tables are stored without chunking to preserve structure.
+        They are classified by category for later retrieval and merging.
+
+        Args:
+            content: The list/table text.
+            list_info: Detection result with content_type and list_format.
+            base_metadata: Base metadata dict.
+            memory_id: Optional custom memory ID.
+            dedupe: Whether to check for duplicates.
+            dedupe_threshold: Similarity threshold for dedup.
+
+        Returns:
+            Dict with memory_id, list_category, and status.
+        """
+        # Classify the list
+        try:
+            classification = self.list_classifier.classify(content)
+
+            # Normalize category against existing ones
+            existing_categories = self.get_list_categories()
+            category = self.list_classifier.normalize_category(
+                classification.category,
+                existing_categories,
+            )
+        except Exception:
+            # Fallback if classification fails
+            category = "uncategorized"
+            classification = ListClassification(
+                category=category,
+                schema="",
+                key_field="",
+            )
+
+        # Build list-specific metadata
+        list_metadata = {
+            **base_metadata,
+            **list_info,
+            "list_category": category,
+            "list_schema": classification.schema,
+            "list_key_field": classification.key_field,
+        }
+
+        # Generate ID
+        mem_id = memory_id or self._generate_id(content)
+
+        # Store embedding and content
+        embedding = self.embedding_service.embed_text(content)
+
+        self.collection.add(
+            ids=[mem_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[list_metadata],
+        )
+
+        return {
+            "memory_id": mem_id,
+            "status": "added",
+            "content_type": list_info["content_type"],
+            "list_category": category,
+            "list_schema": classification.schema,
+        }
+
+    def get_list_categories(self) -> List[str]:
+        """Get all existing list categories.
+
+        Returns:
+            List of unique category names.
+        """
+        try:
+            results = self.collection.get(
+                where={"content_type": {"$in": ["list", "table"]}},
+                include=["metadatas"],
+            )
+        except Exception:
+            return []
+
+        categories = set()
+        if results["metadatas"]:
+            for meta in results["metadatas"]:
+                if meta and "list_category" in meta:
+                    categories.add(meta["list_category"])
+
+        return list(categories)
+
+    def get_lists(
+        self,
+        category: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Get all lists/tables, optionally filtered by category.
+
+        Args:
+            category: Optional category to filter by.
+            user_id: Optional user ID to filter by.
+            limit: Maximum number of results.
+
+        Returns:
+            List of list/table memories with content and metadata.
+        """
+        where_conditions = []
+        where_conditions.append({"content_type": {"$in": ["list", "table"]}})
+
+        if category:
+            where_conditions.append({"list_category": category})
+        if user_id:
+            where_conditions.append({"user_id": user_id})
+
+        if len(where_conditions) == 1:
+            where_clause = where_conditions[0]
+        else:
+            where_clause = {"$and": where_conditions}
+
+        try:
+            results = self.collection.get(
+                where=where_clause,
+                include=["documents", "metadatas"],
+                limit=limit,
+            )
+        except Exception:
+            return []
+
+        lists = []
+        if results["ids"]:
+            for i, mem_id in enumerate(results["ids"]):
+                lists.append({
+                    "id": mem_id,
+                    "content": results["documents"][i] if results["documents"] else "",
+                    "metadata": results["metadatas"][i] if results["metadatas"] else {},
+                })
+
+        return lists
+
+    def merge_lists(
+        self,
+        category: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Merge all lists of a category into a combined result.
+
+        For tables: Combines rows, deduplicates by key_field.
+        For bullet/numbered lists: Combines items, deduplicates by content.
+
+        Args:
+            category: The list category to merge.
+            user_id: Optional user ID to filter by.
+
+        Returns:
+            Dict with merged_content, source_ids, and item_count.
+        """
+        lists = self.get_lists(category=category, user_id=user_id)
+
+        if not lists:
+            return {
+                "merged_content": "",
+                "source_ids": [],
+                "item_count": 0,
+            }
+
+        source_ids = [lst["id"] for lst in lists]
+
+        # Determine format from first list
+        first_format = lists[0]["metadata"].get("list_format", "bullet")
+        key_field = lists[0]["metadata"].get("list_key_field", "")
+
+        if first_format == "markdown_table":
+            merged = self._merge_tables(lists, key_field)
+        else:
+            merged = self._merge_bullet_lists(lists)
+
+        return {
+            "merged_content": merged["content"],
+            "source_ids": source_ids,
+            "item_count": merged["count"],
+        }
+
+    def _merge_tables(
+        self,
+        lists: List[Dict[str, Any]],
+        key_field: str,
+    ) -> Dict[str, Any]:
+        """Merge multiple markdown tables into one.
+
+        Args:
+            lists: List of table memories.
+            key_field: Field to use for deduplication.
+
+        Returns:
+            Dict with content and count.
+        """
+        import re
+
+        all_rows: List[List[str]] = []
+        header: Optional[List[str]] = None
+        seen_keys: set = set()
+        key_index = 0
+
+        for lst in lists:
+            content = lst["content"]
+            lines = content.strip().split("\n")
+
+            for i, line in enumerate(lines):
+                if not line.strip() or re.match(r"^\|?[\s\-:|]+\|?$", line.strip()):
+                    continue
+
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+
+                if header is None:
+                    header = cells
+                    # Find key field index
+                    for idx, h in enumerate(header):
+                        if h.lower().replace(" ", "_") == key_field.lower().replace(" ", "_"):
+                            key_index = idx
+                            break
+                    continue
+
+                # Skip if this is another header row (same as first)
+                if cells == header:
+                    continue
+
+                # Dedupe by key field
+                if key_index < len(cells):
+                    key_value = cells[key_index]
+                    if key_value in seen_keys:
+                        continue
+                    seen_keys.add(key_value)
+
+                all_rows.append(cells)
+
+        if not header:
+            return {"content": "", "count": 0}
+
+        # Build merged table
+        lines = []
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+        for row in all_rows:
+            # Pad row if needed
+            while len(row) < len(header):
+                row.append("")
+            lines.append("| " + " | ".join(row[:len(header)]) + " |")
+
+        return {"content": "\n".join(lines), "count": len(all_rows)}
+
+    def _merge_bullet_lists(
+        self,
+        lists: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Merge multiple bullet/numbered lists into one.
+
+        Args:
+            lists: List of list memories.
+
+        Returns:
+            Dict with content and count.
+        """
+        import re
+
+        items: List[str] = []
+        seen: set = set()
+
+        for lst in lists:
+            content = lst["content"]
+            lines = content.strip().split("\n")
+
+            for line in lines:
+                # Match bullet or numbered items
+                match = re.match(r"^\s*(?:[-*•]|\d+[.)])\s+(.+)$", line)
+                if match:
+                    item_text = match.group(1).strip()
+                    # Normalize for dedup
+                    normalized = item_text.lower().strip()
+                    if normalized not in seen:
+                        seen.add(normalized)
+                        items.append(item_text)
+
+        # Rebuild as bullet list
+        merged = "\n".join(f"- {item}" for item in items)
+        return {"content": merged, "count": len(items)}
 
     def _upsert_extracted_item(
         self,

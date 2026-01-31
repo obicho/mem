@@ -475,3 +475,172 @@ def test_get_related_memories(memory_client):
     # All should share the same group_id
     for r in related:
         assert r["metadata"]["group_id"] == group_id
+
+
+# --- List/table tests ---
+
+from app.core.list_classifier import ListClassification
+
+
+MOCK_LIST_CLASSIFICATION = ListClassification(
+    category="suppliers",
+    schema="name, location",
+    key_field="name",
+)
+
+
+def test_add_table_detected_and_classified(memory_client):
+    """Markdown table is detected and stored with classification."""
+    table_content = """| Supplier | Location |
+|----------|----------|
+| NSL Industry | Thailand |
+| Asahi-Thai | Thailand |"""
+
+    with patch.object(
+        memory_client.list_classifier, "classify", return_value=MOCK_LIST_CLASSIFICATION
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            result = memory_client.add(table_content, user_id="test_user")
+
+    assert result["status"] == "added"
+    assert result["content_type"] == "table"
+    assert result["list_category"] == "suppliers"
+
+    # Verify stored metadata
+    mem = memory_client.get(result["memory_id"])
+    assert mem["metadata"]["content_type"] == "table"
+    assert mem["metadata"]["list_category"] == "suppliers"
+    assert mem["metadata"]["list_format"] == "markdown_table"
+
+
+def test_add_bullet_list_detected(memory_client):
+    """Bullet list is detected and stored without chunking."""
+    list_content = """- First supplier
+- Second supplier
+- Third supplier
+- Fourth supplier"""
+
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="name", key_field="name"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            result = memory_client.add(list_content, user_id="test_user")
+
+    assert result["status"] == "added"
+    assert result["content_type"] == "list"
+
+    # Content should be stored as-is (no chunking)
+    mem = memory_client.get(result["memory_id"])
+    assert "First supplier" in mem["content"]
+    assert "Fourth supplier" in mem["content"]
+
+
+def test_get_lists_by_category(memory_client):
+    """get_lists returns lists filtered by category."""
+    table1 = """| Name | Country |
+|------|---------|
+| Acme | USA |"""
+
+    table2 = """| Name | Country |
+|------|---------|
+| Beta | Canada |"""
+
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="name, country", key_field="name"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            memory_client.add(table1, user_id="test_user")
+            memory_client.add(table2, user_id="test_user")
+
+    lists = memory_client.get_lists(category="suppliers")
+    assert len(lists) == 2
+
+
+def test_merge_tables(memory_client):
+    """merge_lists combines tables and dedupes by key field."""
+    table1 = """| Name | Location |
+|------|----------|
+| NSL | Thailand |
+| Asahi | Thailand |"""
+
+    table2 = """| Name | Location |
+|------|----------|
+| NSL | Thailand |
+| DALI | Thailand |"""
+
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="name, location", key_field="name"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            memory_client.add(table1, user_id="test_user")
+            memory_client.add(table2, user_id="test_user")
+
+    result = memory_client.merge_lists(category="suppliers")
+
+    assert result["item_count"] == 3  # NSL, Asahi, DALI (NSL deduped)
+    assert len(result["source_ids"]) == 2
+    assert "NSL" in result["merged_content"]
+    assert "Asahi" in result["merged_content"]
+    assert "DALI" in result["merged_content"]
+
+
+def test_merge_bullet_lists(memory_client):
+    """merge_lists combines bullet lists and dedupes."""
+    list1 = """- Apple
+- Banana
+- Cherry"""
+
+    list2 = """- Banana
+- Date
+- Elderberry"""
+
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="fruits", schema="name", key_field="name"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="fruits"
+        ):
+            memory_client.add(list1, user_id="test_user")
+            memory_client.add(list2, user_id="test_user")
+
+    result = memory_client.merge_lists(category="fruits")
+
+    assert result["item_count"] == 5  # Apple, Banana, Cherry, Date, Elderberry
+    assert "Apple" in result["merged_content"]
+    assert "Date" in result["merged_content"]
+
+
+def test_get_list_categories(memory_client):
+    """get_list_categories returns all unique categories."""
+    table = """| Name | Price |
+|------|-------|
+| Item | $10 |"""
+
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="products", schema="name, price", key_field="name"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="products"
+        ):
+            memory_client.add(table, user_id="test_user")
+
+    categories = memory_client.get_list_categories()
+    assert "products" in categories
