@@ -14,6 +14,7 @@ from chromadb.config import Settings as ChromaSettings
 from app.core.chat_summarizer import ChatSummarizer
 from app.core.chunker import chunk_content, detect_content_type, ContentType
 from app.core.embeddings import EmbeddingService
+from app.core.excel_parser import ExcelParser
 from app.core.feedback import Feedback, FeedbackStore
 from app.core.list_classifier import ListClassifier, ListClassification, detect_list_or_table
 from app.core.pdf_parser import PDFParser
@@ -73,6 +74,7 @@ class Memory:
         self.chat_summarizer = ChatSummarizer(api_key=api_key, model=vision_model)
         self.list_classifier = ListClassifier(api_key=api_key, model=vision_model)
         self.pdf_parser = PDFParser()
+        self.excel_parser = ExcelParser()
         self.feedback_store = FeedbackStore(db_path=feedback_db)
         self.image_dir = Path(image_dir)
         self.image_dir.mkdir(parents=True, exist_ok=True)
@@ -902,6 +904,308 @@ class Memory:
             "chunks_created": len(memory_ids),
             "status": "added",
         }
+
+    def add_excel(
+        self,
+        file_path: Optional[str] = None,
+        file_bytes: Optional[bytes] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        filename: Optional[str] = None,
+        dedupe: bool = True,
+        auto_merge: bool = True,
+    ) -> Dict[str, Any]:
+        """Add an Excel/CSV file to memory.
+
+        Each sheet becomes a table memory. If auto_merge=True and a list
+        with the same category exists, appends new rows (deduped by key_field).
+
+        Args:
+            file_path: Path to the Excel/CSV file.
+            file_bytes: Raw file bytes (alternative to file_path).
+            user_id: Optional user identifier for filtering.
+            agent_id: Optional agent identifier for filtering.
+            run_id: Optional run/session identifier.
+            metadata: Optional additional metadata.
+            filename: Optional filename for the stored file.
+            dedupe: Whether to check for duplicate files by hash. Default True.
+            auto_merge: Whether to merge with existing lists of same category. Default True.
+
+        Returns:
+            Dict with memory_ids, sheet results, and status. If duplicate found,
+            returns existing info with status "duplicate".
+        """
+        if not file_path and not file_bytes:
+            raise ValueError("Must provide either file_path or file_bytes")
+
+        # Get file bytes for hashing
+        if file_path:
+            with open(file_path, "rb") as f:
+                excel_bytes = f.read()
+        else:
+            excel_bytes = file_bytes
+
+        # Check for duplicate file by hash
+        if dedupe:
+            file_hash = hashlib.sha256(excel_bytes).hexdigest()[:32]
+            try:
+                hash_results = self.collection.get(
+                    where={"excel_file_hash": file_hash},
+                    include=["metadatas"],
+                )
+                if hash_results["ids"]:
+                    existing_meta = hash_results["metadatas"][0] if hash_results["metadatas"] else {}
+                    return {
+                        "memory_id": hash_results["ids"][0],
+                        "status": "duplicate",
+                        "match_type": "exact_file",
+                        "file_hash": file_hash,
+                    }
+            except Exception:
+                pass  # excel_file_hash field might not exist
+
+        # Parse Excel file
+        parsed = self.excel_parser.parse(file_path=file_path, file_bytes=file_bytes)
+
+        if not parsed.sheets:
+            raise ValueError("Excel file contains no data")
+
+        # Store Excel file
+        if file_path:
+            stored_filename = filename or Path(file_path).name
+        else:
+            ext = ".xlsx"
+            stored_filename = filename or f"{parsed.file_hash}{ext}"
+
+        stored_path = self.files_dir / stored_filename
+        if file_path:
+            shutil.copy2(file_path, stored_path)
+        else:
+            with open(stored_path, "wb") as f:
+                f.write(file_bytes)
+
+        # Process each sheet
+        sheet_results = []
+        memory_ids = []
+        total_rows = 0
+        merged_count = 0
+        new_count = 0
+
+        for sheet in parsed.sheets:
+            # Classify the sheet content
+            try:
+                classification = self.list_classifier.classify(sheet.markdown)
+                existing_categories = self.get_list_categories()
+                category = self.list_classifier.normalize_category(
+                    classification.category,
+                    existing_categories,
+                )
+            except Exception:
+                category = "uncategorized"
+                classification = ListClassification(
+                    category=category,
+                    schema="",
+                    key_field="",
+                )
+
+            # Check for existing list with same category to merge into
+            merged = False
+            if auto_merge and category != "uncategorized":
+                existing_lists = self.get_lists(category=category, user_id=user_id, limit=1)
+                if existing_lists:
+                    # Merge into existing list
+                    merge_result = self._merge_into_existing_list(
+                        existing_id=existing_lists[0]["id"],
+                        new_content=sheet.markdown,
+                        key_field=classification.key_field,
+                        new_rows=sheet.rows,
+                        excel_metadata={
+                            "excel_sheet_name": sheet.name,
+                            "excel_file_hash": parsed.file_hash,
+                            "excel_file_path": str(stored_path),
+                        },
+                    )
+                    sheet_results.append({
+                        "sheet_name": sheet.name,
+                        "category": category,
+                        "row_count": sheet.row_count,
+                        "status": "merged",
+                        "memory_id": existing_lists[0]["id"],
+                        "rows_added": merge_result["rows_added"],
+                        "rows_skipped": merge_result["rows_skipped"],
+                    })
+                    memory_ids.append(existing_lists[0]["id"])
+                    merged = True
+                    merged_count += 1
+
+            if not merged:
+                # Create new list memory
+                base_metadata: Dict[str, Any] = {
+                    "created_at": datetime.utcnow().isoformat(),
+                    "content_hash": self._compute_content_hash(sheet.markdown),
+                    "content_type": "table",
+                    "list_format": "excel",
+                    "list_category": category,
+                    "list_schema": classification.schema,
+                    "list_key_field": classification.key_field,
+                    "excel_sheet_name": sheet.name,
+                    "excel_file_hash": parsed.file_hash,
+                    "excel_file_path": str(stored_path),
+                    "excel_row_count": sheet.row_count,
+                }
+                if user_id:
+                    base_metadata["user_id"] = user_id
+                if agent_id:
+                    base_metadata["agent_id"] = agent_id
+                if run_id:
+                    base_metadata["run_id"] = run_id
+                if metadata:
+                    base_metadata.update(metadata)
+
+                mem_id = self._generate_id(sheet.markdown)
+                embedding = self.embedding_service.embed_text(sheet.markdown)
+
+                self.collection.add(
+                    ids=[mem_id],
+                    embeddings=[embedding],
+                    documents=[sheet.markdown],
+                    metadatas=[base_metadata],
+                )
+
+                sheet_results.append({
+                    "sheet_name": sheet.name,
+                    "category": category,
+                    "row_count": sheet.row_count,
+                    "status": "added",
+                    "memory_id": mem_id,
+                })
+                memory_ids.append(mem_id)
+                new_count += 1
+
+            total_rows += sheet.row_count
+
+        return {
+            "memory_ids": memory_ids,
+            "file_path": str(stored_path),
+            "sheet_count": parsed.sheet_count,
+            "total_rows": total_rows,
+            "sheets": sheet_results,
+            "merged_count": merged_count,
+            "new_count": new_count,
+            "status": "added",
+        }
+
+    def _merge_into_existing_list(
+        self,
+        existing_id: str,
+        new_content: str,
+        key_field: str,
+        new_rows: list[list[str]],
+        excel_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge new table rows into existing list memory.
+
+        Args:
+            existing_id: ID of the existing list memory.
+            new_content: New markdown table content.
+            key_field: Field to use for deduplication.
+            new_rows: List of new rows to add.
+            excel_metadata: Excel-specific metadata to add.
+
+        Returns:
+            Dict with rows_added and rows_skipped counts.
+        """
+        import re
+
+        existing = self.get(existing_id)
+        if not existing:
+            raise ValueError(f"Memory not found: {existing_id}")
+
+        existing_content = existing["content"]
+        existing_meta = existing["metadata"]
+
+        # Parse existing table
+        existing_lines = existing_content.strip().split("\n")
+        existing_header: Optional[list[str]] = None
+        existing_rows: list[list[str]] = []
+        key_index = 0
+
+        for line in existing_lines:
+            if not line.strip() or re.match(r"^\|?[\s\-:|]+\|?$", line.strip()):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if existing_header is None:
+                existing_header = cells
+                # Find key field index
+                for idx, h in enumerate(existing_header):
+                    if h.lower().replace(" ", "_") == key_field.lower().replace(" ", "_"):
+                        key_index = idx
+                        break
+                continue
+            existing_rows.append(cells)
+
+        if not existing_header:
+            return {"rows_added": 0, "rows_skipped": len(new_rows)}
+
+        # Get existing key values
+        existing_keys = set()
+        for row in existing_rows:
+            if key_index < len(row):
+                existing_keys.add(row[key_index].lower().strip())
+
+        # Add new rows that don't exist
+        rows_added = 0
+        rows_skipped = 0
+        for row in new_rows:
+            if key_index < len(row):
+                key_value = row[key_index].lower().strip()
+                if key_value in existing_keys:
+                    rows_skipped += 1
+                    continue
+                existing_keys.add(key_value)
+            existing_rows.append(row)
+            rows_added += 1
+
+        # Rebuild merged table
+        lines = []
+        lines.append("| " + " | ".join(existing_header) + " |")
+        lines.append("| " + " | ".join(["---"] * len(existing_header)) + " |")
+        for row in existing_rows:
+            # Pad row if needed
+            padded = row + [""] * (len(existing_header) - len(row))
+            escaped = [cell.replace("|", "\\|") for cell in padded[:len(existing_header)]]
+            lines.append("| " + " | ".join(escaped) + " |")
+
+        merged_content = "\n".join(lines)
+
+        # Update metadata
+        new_meta = existing_meta.copy()
+        new_meta["updated_at"] = datetime.utcnow().isoformat()
+        new_meta["content_hash"] = self._compute_content_hash(merged_content)
+        new_meta["excel_row_count"] = len(existing_rows)
+        # Track source files
+        source_hashes = new_meta.get("excel_source_hashes", "")
+        if excel_metadata.get("excel_file_hash"):
+            if source_hashes:
+                source_hashes += "," + excel_metadata["excel_file_hash"]
+            else:
+                source_hashes = excel_metadata["excel_file_hash"]
+            new_meta["excel_source_hashes"] = source_hashes
+
+        # Generate new embedding
+        embedding = self.embedding_service.embed_text(merged_content)
+
+        # Update in ChromaDB
+        self.collection.update(
+            ids=[existing_id],
+            embeddings=[embedding],
+            documents=[merged_content],
+            metadatas=[new_meta],
+        )
+
+        return {"rows_added": rows_added, "rows_skipped": rows_skipped}
 
     def feedback(
         self,

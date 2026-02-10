@@ -644,3 +644,247 @@ def test_get_list_categories(memory_client):
 
     categories = memory_client.get_list_categories()
     assert "products" in categories
+
+
+# --- Excel tests ---
+
+import io
+import pandas as pd
+
+
+@pytest.fixture
+def sample_excel_bytes():
+    """Create sample Excel bytes for testing."""
+    df = pd.DataFrame({
+        "Supplier": ["NSL Industry", "Asahi-Thai"],
+        "Location": ["Thailand", "Thailand"],
+    })
+    buffer = io.BytesIO()
+    df.to_excel(buffer, index=False, sheet_name="Suppliers")
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def sample_excel_bytes_2():
+    """Create another sample Excel with overlapping and new data."""
+    df = pd.DataFrame({
+        "Supplier": ["NSL Industry", "DALI Corp"],  # NSL is duplicate
+        "Location": ["Thailand", "Japan"],
+    })
+    buffer = io.BytesIO()
+    df.to_excel(buffer, index=False, sheet_name="Suppliers")
+    return buffer.getvalue()
+
+
+def test_add_excel_creates_table_memories(memory_client, sample_excel_bytes):
+    """Test that add_excel creates table memories for each sheet."""
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="supplier, location", key_field="supplier"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            result = memory_client.add_excel(
+                file_bytes=sample_excel_bytes,
+                user_id="test_user",
+            )
+
+    assert result["status"] == "added"
+    assert result["sheet_count"] == 1
+    assert result["total_rows"] == 2
+    assert result["new_count"] == 1
+    assert len(result["memory_ids"]) == 1
+
+    # Verify memory was stored
+    mem_id = result["memory_ids"][0]
+    memory = memory_client.get(mem_id)
+    assert memory is not None
+    assert memory["metadata"]["content_type"] == "table"
+    assert memory["metadata"]["list_format"] == "excel"
+    assert memory["metadata"]["list_category"] == "suppliers"
+
+
+def test_add_excel_auto_merge_appends_rows(memory_client, sample_excel_bytes, sample_excel_bytes_2):
+    """Test that auto_merge appends rows to existing lists."""
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="supplier, location", key_field="supplier"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            # Add first Excel
+            result1 = memory_client.add_excel(
+                file_bytes=sample_excel_bytes,
+                user_id="test_user",
+            )
+            first_id = result1["memory_ids"][0]
+
+            # Add second Excel with auto_merge
+            result2 = memory_client.add_excel(
+                file_bytes=sample_excel_bytes_2,
+                user_id="test_user",
+                auto_merge=True,
+            )
+
+    assert result2["status"] == "added"
+    assert result2["merged_count"] == 1
+    assert result2["new_count"] == 0
+
+    # Check sheet result details
+    sheet_result = result2["sheets"][0]
+    assert sheet_result["status"] == "merged"
+    assert sheet_result["rows_added"] == 1  # DALI Corp
+    assert sheet_result["rows_skipped"] == 1  # NSL Industry (duplicate)
+
+    # Verify merged content
+    memory = memory_client.get(first_id)
+    assert "NSL Industry" in memory["content"]
+    assert "Asahi-Thai" in memory["content"]
+    assert "DALI Corp" in memory["content"]
+
+
+def test_add_excel_dedupe_by_file_hash(memory_client, sample_excel_bytes):
+    """Test that duplicate files are detected by hash."""
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="supplier, location", key_field="supplier"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            # Add first time
+            result1 = memory_client.add_excel(
+                file_bytes=sample_excel_bytes,
+                user_id="test_user",
+            )
+            assert result1["status"] == "added"
+
+            # Add same file again
+            result2 = memory_client.add_excel(
+                file_bytes=sample_excel_bytes,
+                user_id="test_user",
+            )
+
+    assert result2["status"] == "duplicate"
+    assert result2["match_type"] == "exact_file"
+
+
+def test_add_excel_classifies_each_sheet(memory_client):
+    """Test that each sheet is classified with category/schema."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df = pd.DataFrame({"Name": ["Alice"], "Email": ["alice@test.com"]})
+        df.to_excel(writer, index=False, sheet_name="Contacts")
+
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="contacts", schema="name, email", key_field="email"),
+    ) as mock_classify:
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="contacts"
+        ):
+            result = memory_client.add_excel(
+                file_bytes=buffer.getvalue(),
+                user_id="test_user",
+            )
+
+    # Verify classify was called
+    mock_classify.assert_called()
+
+    # Verify category was set
+    mem = memory_client.get(result["memory_ids"][0])
+    assert mem["metadata"]["list_category"] == "contacts"
+    assert mem["metadata"]["list_schema"] == "name, email"
+    assert mem["metadata"]["list_key_field"] == "email"
+
+
+def test_add_excel_no_merge_when_disabled(memory_client, sample_excel_bytes, sample_excel_bytes_2):
+    """Test that auto_merge=False creates new lists instead of merging."""
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="supplier, location", key_field="supplier"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            # Add first Excel
+            result1 = memory_client.add_excel(
+                file_bytes=sample_excel_bytes,
+                user_id="test_user",
+            )
+
+            # Add second Excel with auto_merge disabled
+            result2 = memory_client.add_excel(
+                file_bytes=sample_excel_bytes_2,
+                user_id="test_user",
+                auto_merge=False,
+                dedupe=False,  # Disable file hash dedupe too
+            )
+
+    assert result2["status"] == "added"
+    assert result2["new_count"] == 1
+    assert result2["merged_count"] == 0
+
+    # Should have two separate memories
+    lists = memory_client.get_lists(category="suppliers")
+    assert len(lists) == 2
+
+
+def test_add_excel_stores_file(memory_client, sample_excel_bytes):
+    """Test that Excel file is stored in files directory."""
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="suppliers", schema="supplier, location", key_field="supplier"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="suppliers"
+        ):
+            result = memory_client.add_excel(
+                file_bytes=sample_excel_bytes,
+                user_id="test_user",
+                filename="test_suppliers.xlsx",
+            )
+
+    assert "file_path" in result
+    assert result["file_path"].endswith("test_suppliers.xlsx")
+
+    # Verify metadata contains file info
+    mem = memory_client.get(result["memory_ids"][0])
+    assert mem["metadata"]["excel_file_path"] == result["file_path"]
+    assert "excel_file_hash" in mem["metadata"]
+
+
+def test_add_excel_handles_csv(memory_client):
+    """Test that CSV files are processed correctly."""
+    csv_content = "Name,Department\nAlice,Engineering\nBob,Sales\n"
+    csv_bytes = csv_content.encode("utf-8")
+
+    with patch.object(
+        memory_client.list_classifier,
+        "classify",
+        return_value=ListClassification(category="employees", schema="name, department", key_field="name"),
+    ):
+        with patch.object(
+            memory_client.list_classifier, "normalize_category", return_value="employees"
+        ):
+            result = memory_client.add_excel(
+                file_bytes=csv_bytes,
+                user_id="test_user",
+                filename="employees.csv",
+            )
+
+    assert result["status"] == "added"
+    assert result["sheet_count"] == 1
+    assert result["total_rows"] == 2
+
+    mem = memory_client.get(result["memory_ids"][0])
+    assert "Alice" in mem["content"]
+    assert "Engineering" in mem["content"]

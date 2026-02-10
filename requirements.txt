@@ -12,6 +12,8 @@ streamlit>=1.28.0
 
 # Document parsing
 pypdf>=3.17.0
+pandas>=2.0.0
+openpyxl>=3.1.0
 
 # Development dependencies
 pytest>=7.4.0

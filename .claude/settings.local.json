@@ -5,7 +5,16 @@
       "Bash(python3:*)",
       "Bash(python -m py_compile:*)",
       "Bash(python:*)",
-      "Bash(.venv/bin/python -m pytest:*)"
+      "Bash(.venv/bin/python -m pytest:*)",
+      "Bash(pip install:*)",
+      "Bash(ls:*)",
+      "Bash(for f in Screenshot*)",
+      "Bash(do echo \"$f\")",
+      "Bash(done)",
+      "Bash(do cp \"$f\" docs/search-memories.png)",
+      "Bash(do cp \"$f\" docs/add-memory.png)",
+      "Bash(do cp \"$f\" docs/image-upload.png)",
+      "Bash(do cp \"$f\" docs/search-results.png)"
     ]
   }
 }

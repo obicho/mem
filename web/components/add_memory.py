@@ -7,7 +7,7 @@ from app.client import Memory
 
 
 def render_add_memory(memory_client: Memory) -> None:
-    """Render the add memory form with support for text, images, and PDFs.
+    """Render the add memory form with support for text, images, PDFs, and Excel.
 
     Args:
         memory_client: The Memory client instance
@@ -15,7 +15,7 @@ def render_add_memory(memory_client: Memory) -> None:
     st.header("Add Memory")
 
     # Tabs for different content types
-    tab_text, tab_image, tab_pdf = st.tabs(["Text", "Image", "PDF"])
+    tab_text, tab_image, tab_pdf, tab_excel = st.tabs(["Text", "Image", "PDF", "Excel"])
 
     with tab_text:
         render_text_form(memory_client)
@@ -25,6 +25,9 @@ def render_add_memory(memory_client: Memory) -> None:
 
     with tab_pdf:
         render_pdf_form(memory_client)
+
+    with tab_excel:
+        render_excel_form(memory_client)
 
 
 def render_text_form(memory_client: Memory) -> None:
@@ -307,3 +310,126 @@ def render_pdf_form(memory_client: Memory) -> None:
                 st.toast("PDF added!", icon="📄")
             except Exception as e:
                 st.error(f"Failed to add PDF: {e}")
+
+
+def render_excel_form(memory_client: Memory) -> None:
+    """Render the Excel upload form."""
+    with st.form("add_excel_form", clear_on_submit=True):
+        # Excel upload
+        uploaded_file = st.file_uploader(
+            "Upload Excel/CSV file",
+            type=["xlsx", "xls", "csv"],
+            help="Upload an Excel or CSV file. Each sheet will be converted to a table memory.",
+        )
+
+        # Auto-merge option
+        auto_merge = st.checkbox(
+            "Auto-merge with existing lists",
+            value=True,
+            help="Append rows to existing lists with the same category (deduplicates by key field)",
+        )
+
+        # Optional fields in columns
+        col1, col2 = st.columns(2)
+
+        with col1:
+            user_id = st.text_input(
+                "User ID (optional)",
+                placeholder="e.g., alice",
+                help="Identifier for the user this memory belongs to",
+                key="excel_user_id",
+            )
+
+        with col2:
+            agent_id = st.text_input(
+                "Agent ID (optional)",
+                placeholder="e.g., agent_123",
+                help="Identifier for the agent that created this memory",
+                key="excel_agent_id",
+            )
+
+        # Metadata JSON input
+        metadata_str = st.text_area(
+            "Custom Metadata (optional)",
+            placeholder='{"key": "value"}',
+            height=100,
+            help="Additional metadata as JSON",
+            key="excel_metadata",
+        )
+
+        # Submit button
+        submitted = st.form_submit_button(
+            "Upload & Process Excel",
+            type="primary",
+            use_container_width=True,
+        )
+
+        if submitted:
+            if not uploaded_file:
+                st.error("Please upload an Excel or CSV file")
+                return
+
+            # Parse metadata
+            metadata = None
+            if metadata_str.strip():
+                try:
+                    metadata = json.loads(metadata_str)
+                    if not isinstance(metadata, dict):
+                        st.error("Metadata must be a JSON object")
+                        return
+                except json.JSONDecodeError as e:
+                    st.error(f"Invalid JSON metadata: {e}")
+                    return
+
+            # Add Excel to memory
+            try:
+                with st.spinner("Processing Excel file..."):
+                    # Read file bytes
+                    file_bytes = uploaded_file.read()
+
+                    # Add custom metadata for original filename
+                    if metadata is None:
+                        metadata = {}
+                    metadata["original_filename"] = uploaded_file.name
+
+                    result = memory_client.add_excel(
+                        file_bytes=file_bytes,
+                        user_id=user_id if user_id else None,
+                        agent_id=agent_id if agent_id else None,
+                        metadata=metadata,
+                        filename=uploaded_file.name,
+                        auto_merge=auto_merge,
+                    )
+
+                # Display results
+                if result["status"] == "duplicate":
+                    st.warning("This file has already been added to memory.")
+                else:
+                    st.success(
+                        f"Excel processed! {result['sheet_count']} sheet(s), "
+                        f"{result['total_rows']} total rows. "
+                        f"({result['new_count']} new, {result['merged_count']} merged)"
+                    )
+
+                    # Show sheet details
+                    for sheet_info in result.get("sheets", []):
+                        status_icon = "+" if sheet_info["status"] == "added" else "~"
+                        status_text = "New" if sheet_info["status"] == "added" else "Merged"
+
+                        if sheet_info["status"] == "merged":
+                            st.info(
+                                f"{status_icon} **{sheet_info['sheet_name']}** "
+                                f"({sheet_info['category']}): {status_text} - "
+                                f"{sheet_info.get('rows_added', 0)} rows added, "
+                                f"{sheet_info.get('rows_skipped', 0)} duplicates skipped"
+                            )
+                        else:
+                            st.info(
+                                f"{status_icon} **{sheet_info['sheet_name']}** "
+                                f"({sheet_info['category']}): {status_text} - "
+                                f"{sheet_info['row_count']} rows"
+                            )
+
+                st.toast("Excel processed!", icon="📊")
+            except Exception as e:
+                st.error(f"Failed to process Excel: {e}")
