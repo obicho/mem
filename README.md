@@ -230,4 +230,4 @@ pytest --cov=app --cov-report=html
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE) for details.
