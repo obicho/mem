@@ -94,7 +94,7 @@ cp .env.example .env
 
 ```env
 OPENAI_API_KEY=sk-your-key-here
-API_KEY=your-api-key-for-rest-api
+API_KEY=can_be_whatever_not_really_checking
 ```
 
 ### Run
