@@ -6,14 +6,14 @@ import shutil
 import pytest
 from unittest.mock import MagicMock, patch
 
-from app.core.chat_summarizer import ChatSummaryResult
-from app.core.chunker import detect_content_type, ContentType
+from mem.core.chat_summarizer import ChatSummaryResult
+from mem.core.chunker import detect_content_type, ContentType
 
 
 @pytest.fixture
 def mock_embedding_service():
     """Mock the embedding service with content-dependent embeddings."""
-    with patch("app.client.EmbeddingService") as mock:
+    with patch("mem.client.EmbeddingService") as mock:
         instance = MagicMock()
         # Generate different embeddings based on content hash to avoid false duplicates
         def generate_embedding(text):
@@ -40,7 +40,7 @@ def temp_persist_dir(tmp_path):
 @pytest.fixture
 def memory_client(mock_embedding_service, temp_persist_dir):
     """Create a Memory client with mocked embeddings."""
-    from app.client import Memory
+    from mem.client import Memory
     return Memory(
         api_key="test-key",
         persist_dir=temp_persist_dir,
@@ -479,7 +479,7 @@ def test_get_related_memories(memory_client):
 
 # --- List/table tests ---
 
-from app.core.list_classifier import ListClassification
+from mem.core.list_classifier import ListClassification
 
 
 MOCK_LIST_CLASSIFICATION = ListClassification(

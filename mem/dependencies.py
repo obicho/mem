@@ -4,8 +4,8 @@ from functools import lru_cache
 
 from fastapi import Depends, Header, HTTPException, status
 
-from app.config import Settings, get_settings
-from app.db.chromadb import ChromaDBClient, get_db_client
+from mem.config import Settings, get_settings
+from mem.db.chromadb import ChromaDBClient, get_db_client
 
 
 async def verify_api_key(
@@ -29,6 +29,6 @@ def get_db() -> ChromaDBClient:
 @lru_cache()
 def get_memory_client():
     """Get Memory client singleton."""
-    from app.client import Memory
+    from mem.client import Memory
     settings = get_settings()
     return Memory(api_key=settings.openai_api_key)

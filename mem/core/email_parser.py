@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import extract_msg
 
-from app.models.schemas import Attachment, EmailDocument
+from mem.models.schemas import Attachment, EmailDocument
 
 
 def _parse_address_list(value: Optional[str]) -> List[str]:

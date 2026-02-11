@@ -3,9 +3,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import emails, search
-from app.config import get_settings
-from app.models.schemas import APIResponse, HealthResponse
+from mem.api.routes import emails, search
+from mem.config import get_settings
+from mem.models.schemas import APIResponse, HealthResponse
 
 settings = get_settings()
 

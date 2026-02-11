@@ -7,8 +7,8 @@ import streamlit as st
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.client import Memory
-from app.config import get_settings
+from mem.client import Memory
+from mem.config import get_settings
 from web.components.sidebar import render_sidebar
 from web.components.add_memory import render_add_memory
 from web.components.search import render_search

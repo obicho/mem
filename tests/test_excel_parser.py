@@ -4,7 +4,7 @@ import io
 import pytest
 import pandas as pd
 
-from app.core.excel_parser import ExcelParser, ParsedExcel, ParsedSheet
+from mem.core.excel_parser import ExcelParser, ParsedExcel, ParsedSheet
 
 
 @pytest.fixture

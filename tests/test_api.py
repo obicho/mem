@@ -4,8 +4,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
-from app.main import app
-from app.config import Settings
+from mem.main import app
+from mem.config import Settings
 
 
 # Mock settings for tests
@@ -20,7 +20,7 @@ def mock_settings():
 
 @pytest.fixture
 def client(mock_settings):
-    with patch("app.config.get_settings", return_value=mock_settings):
+    with patch("mem.config.get_settings", return_value=mock_settings):
         with TestClient(app) as c:
             yield c
 
@@ -62,7 +62,7 @@ def test_unauthorized_with_wrong_api_key(client):
     assert response.status_code == 401
 
 
-@patch("app.api.routes.emails.get_db")
+@patch("mem.api.routes.emails.get_db")
 def test_list_emails_empty(mock_get_db, client, auth_headers):
     """Test listing emails when empty."""
     mock_db = MagicMock()
@@ -77,8 +77,8 @@ def test_list_emails_empty(mock_get_db, client, auth_headers):
     assert data["data"]["total"] == 0
 
 
-@patch("app.api.routes.search.get_db")
-@patch("app.api.routes.search.embed_text")
+@patch("mem.api.routes.search.get_db")
+@patch("mem.api.routes.search.embed_text")
 def test_search_endpoint(mock_embed, mock_get_db, client, auth_headers):
     """Test search endpoint."""
     mock_embed.return_value = [0.1] * 1536  # Mock embedding
@@ -131,9 +131,9 @@ def mock_memory_client():
 @pytest.fixture
 def inbound_client(mock_settings, mock_memory_client):
     """Test client with mocked Memory dependency."""
-    from app.dependencies import get_memory_client
+    from mem.dependencies import get_memory_client
 
-    with patch("app.config.get_settings", return_value=mock_settings):
+    with patch("mem.config.get_settings", return_value=mock_settings):
         app.dependency_overrides[get_memory_client] = lambda: mock_memory_client
         with TestClient(app) as c:
             yield c

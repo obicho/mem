@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
-from app.config import get_settings
-from app.models.schemas import EmailChunk, EmailDocument, EmailSummary, SearchResult
+from mem.config import get_settings
+from mem.models.schemas import EmailChunk, EmailDocument, EmailSummary, SearchResult
 
 COLLECTION_NAME = "emails"
 

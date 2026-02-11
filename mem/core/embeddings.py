@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from openai import OpenAI
 
-from app.config import get_settings
+from mem.config import get_settings
 
 
 class EmbeddingService:

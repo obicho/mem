@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import streamlit as st
-from app.client import Memory
+from mem.client import Memory
 from web.components.memory_card import render_memory_card
 
 

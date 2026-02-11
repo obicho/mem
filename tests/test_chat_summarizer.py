@@ -4,7 +4,7 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from app.core.chat_summarizer import (
+from mem.core.chat_summarizer import (
     ChatExtractedItem,
     ChatSummarizer,
     ChatSummaryResult,
@@ -26,7 +26,7 @@ SAMPLE_LLM_RESPONSE = json.dumps({
 @pytest.fixture
 def mock_openai_client():
     """Mock the OpenAI client for ChatSummarizer."""
-    with patch("app.core.chat_summarizer.OpenAI") as mock_cls:
+    with patch("mem.core.chat_summarizer.OpenAI") as mock_cls:
         client_instance = MagicMock()
         mock_cls.return_value = client_instance
 
@@ -84,7 +84,7 @@ def test_extract_all_items_flattened(summarizer):
 
 def test_extract_empty_chat_raises():
     """ValueError on empty input."""
-    with patch("app.core.chat_summarizer.OpenAI"):
+    with patch("mem.core.chat_summarizer.OpenAI"):
         summarizer = ChatSummarizer(api_key="test-key")
 
     with pytest.raises(ValueError, match="Chat text cannot be empty"):

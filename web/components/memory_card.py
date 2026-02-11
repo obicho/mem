@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import streamlit as st
-from app.client import Memory
+from mem.client import Memory
 
 
 def render_memory_card(

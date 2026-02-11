@@ -2,8 +2,8 @@
 
 import pytest
 
-from app.core.email_parser import parse_eml
-from app.models.schemas import EmailDocument
+from mem.core.email_parser import parse_eml
+from mem.models.schemas import EmailDocument
 
 
 SAMPLE_EML = b"""From: sender@example.com

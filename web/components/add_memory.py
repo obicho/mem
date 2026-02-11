@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
-from app.client import Memory
+from mem.client import Memory
 
 
 def render_add_memory(memory_client: Memory) -> None:

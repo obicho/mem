@@ -36,7 +36,7 @@ Memory meets you where you are. Pick the interface that fits your workflow:
 
 | | Interface | Best For |
 |---|---|---|
-| **Python Client** | `from app.client import Memory` | Embedding memory directly into your agent code. Import, call, done. |
+| **Python Client** | `from mem import Memory` | Embedding memory directly into your agent code. Import, call, done. |
 | **REST API** | FastAPI on `localhost:8000` | Integrating from any language or framework. Language-agnostic access for production deployments. |
 | **Web App** | Streamlit on `localhost:8501` | A sandbox to explore and play around. Add memories, run searches, and see results instantly — no code required. Great for demos, debugging, and getting a feel for what semantic memory can do. |
 
@@ -84,7 +84,8 @@ cd mem
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-pip install -r requirements.txt
+pip install -e ".[dev]"    # editable install with dev dependencies
+# Or: pip install .        # standard install
 
 cp .env.example .env
 # Edit .env and add your OPENAI_API_KEY
@@ -104,7 +105,7 @@ API_KEY=can_be_whatever_not_really_checking
 streamlit run web/app.py        # http://localhost:8501
 
 # API Server
-uvicorn app.main:app --reload   # http://localhost:8000/docs
+uvicorn mem.main:app --reload   # http://localhost:8000/docs
 ```
 
 ## Usage
@@ -112,7 +113,7 @@ uvicorn app.main:app --reload   # http://localhost:8000/docs
 ### Python Client
 
 ```python
-from app.client import Memory
+from mem import Memory
 
 m = Memory()
 
@@ -178,7 +179,8 @@ m.add(document_text, content_type="document")
 
 ```
 mem/
-├── app/
+├── mem/
+│   ├── __init__.py         # Package entry point
 │   ├── client.py           # Memory client (main interface)
 │   ├── config.py           # Settings management
 │   ├── main.py             # FastAPI application
@@ -195,7 +197,7 @@ mem/
 │   ├── app.py              # Streamlit entry point
 │   └── components/         # UI components
 ├── tests/
-├── requirements.txt
+├── pyproject.toml
 └── README.md
 ```
 
@@ -217,14 +219,14 @@ pip install -r requirements.txt
 pytest
 
 # With coverage
-pytest --cov=app --cov-report=html
+pytest --cov=mem --cov-report=html
 ```
 
 ### Adding a New Content Type
 
-1. Create parser in `app/core/`
-2. Add chunking strategy in `app/core/chunker.py`
-3. Add method to `app/client.py`
+1. Create parser in `mem/core/`
+2. Add chunking strategy in `mem/core/chunker.py`
+3. Add method to `mem/client.py`
 4. Update web UI in `web/components/`
 5. Write tests in `tests/`
 

@@ -5,13 +5,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 
-from app.client import Memory
-from app.core.chunker import ContentType, chunk_content
-from app.core.email_parser import parse_email
-from app.core.embeddings import embed_batch
-from app.db.chromadb import ChromaDBClient
-from app.dependencies import get_db, get_memory_client, verify_api_key
-from app.models.schemas import (
+from mem.client import Memory
+from mem.core.chunker import ContentType, chunk_content
+from mem.core.email_parser import parse_email
+from mem.core.embeddings import embed_batch
+from mem.db.chromadb import ChromaDBClient
+from mem.dependencies import get_db, get_memory_client, verify_api_key
+from mem.models.schemas import (
     APIResponse,
     EmailChunk,
     EmailListResponse,

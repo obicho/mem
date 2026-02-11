@@ -1,5 +1,5 @@
 import streamlit as st
-from app.client import Memory
+from mem.client import Memory
 
 
 def render_sidebar(memory_client: Memory) -> tuple[str, str | None]:

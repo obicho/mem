@@ -2,9 +2,9 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.client import Memory
-from app.dependencies import get_memory_client, verify_api_key
-from app.models.schemas import APIResponse, SearchRequest
+from mem.client import Memory
+from mem.dependencies import get_memory_client, verify_api_key
+from mem.models.schemas import APIResponse, SearchRequest
 
 router = APIRouter(prefix="/search", tags=["search"])
 

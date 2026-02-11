@@ -4,7 +4,7 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from app.core.list_classifier import (
+from mem.core.list_classifier import (
     ListClassifier,
     ListClassification,
     detect_list_or_table,
@@ -120,7 +120,7 @@ SAMPLE_CLASSIFICATION = json.dumps({
 @pytest.fixture
 def mock_openai_client():
     """Mock the OpenAI client for ListClassifier."""
-    with patch("app.core.list_classifier.OpenAI") as mock_cls:
+    with patch("mem.core.list_classifier.OpenAI") as mock_cls:
         client_instance = MagicMock()
         mock_cls.return_value = client_instance
 

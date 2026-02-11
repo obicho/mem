@@ -14,7 +14,13 @@
       "Bash(do cp \"$f\" docs/search-memories.png)",
       "Bash(do cp \"$f\" docs/add-memory.png)",
       "Bash(do cp \"$f\" docs/image-upload.png)",
-      "Bash(do cp \"$f\" docs/search-results.png)"
+      "Bash(do cp \"$f\" docs/search-results.png)",
+      "Bash(git mv:*)",
+      "Bash(git rm:*)",
+      "Bash(find mem/ tests/ web/ -name \"*.py\" -exec perl -pi -e 's/from app\\\\./from mem./g; s/import app\\\\./import mem./g' {} +)",
+      "Bash(find tests/ -name \"*.py\" -exec perl -pi -e 's/\"\"app\\\\./\"\"mem./g' {} +)",
+      "Bash(git stash:*)",
+      "Bash(git stash pop:*)"
     ]
   }
 }

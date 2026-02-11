@@ -11,14 +11,14 @@ from typing import Any, Dict, List, Optional, Union
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
-from app.core.chat_summarizer import ChatSummarizer
-from app.core.chunker import chunk_content, detect_content_type, ContentType
-from app.core.embeddings import EmbeddingService
-from app.core.excel_parser import ExcelParser
-from app.core.feedback import Feedback, FeedbackStore
-from app.core.list_classifier import ListClassifier, ListClassification, detect_list_or_table
-from app.core.pdf_parser import PDFParser
-from app.core.vision import VisionService
+from mem.core.chat_summarizer import ChatSummarizer
+from mem.core.chunker import chunk_content, detect_content_type, ContentType
+from mem.core.embeddings import EmbeddingService
+from mem.core.excel_parser import ExcelParser
+from mem.core.feedback import Feedback, FeedbackStore
+from mem.core.list_classifier import ListClassifier, ListClassification, detect_list_or_table
+from mem.core.pdf_parser import PDFParser
+from mem.core.vision import VisionService
 
 
 class Memory:
@@ -26,7 +26,7 @@ class Memory:
     A mem0-style memory client for AI agents.
 
     Usage:
-        from app.client import Memory
+        from mem.client import Memory
 
         # Initialize
         m = Memory(api_key="your-openai-key")
@@ -1767,7 +1767,7 @@ def memory(
     Create a Memory client instance.
 
     Usage:
-        from app.client import memory
+        from mem.client import memory
 
         m = memory()
         m.add("User likes coffee", user_id="alice")
